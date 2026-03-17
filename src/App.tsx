@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 

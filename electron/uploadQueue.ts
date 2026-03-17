@@ -146,7 +146,7 @@ export class UploadQueue {
   private lastEmitTime = 0;
   // Limit concurrent /api/r2/process calls
   private activeProcessCalls = 0;
-  private readonly maxProcessConcurrency = 2;
+  private readonly maxProcessConcurrency = 1;
   private processWaiters: Array<() => void> = [];
 
   constructor(options: QueueOptions) {
@@ -329,6 +329,15 @@ export class UploadQueue {
 
           // folder_id is set by the process API (folderId is sent in the request body)
 
+          // ---- Verify photo was saved to DB ----
+          const photoId = file.processResult?.id;
+          if (photoId && photoId !== 'unknown') {
+            const verifyOk = await this.verifyPhotoInDb(photoId);
+            if (!verifyOk) {
+              throw new Error(`DB verification failed: photo ${photoId} not found after process`);
+            }
+          }
+
         // ---- SUCCESS ----
         file.status = 'done';
         this.emitProgress(file);
@@ -352,6 +361,38 @@ export class UploadQueue {
     file.error = lastError?.message || 'שגיאה לא ידועה';
     console.error(`[Upload] 💀 FAILED after ${MAX_RETRIES} attempts: ${file.name} — ${file.error}`);
     this.options.onFileComplete(file.id, false, file.error);
+  }
+
+  // ============================================================================
+  // DB verification — confirm photo was actually saved
+  // ============================================================================
+
+  private async verifyPhotoInDb(photoId: string): Promise<boolean> {
+    try {
+      // Use Supabase REST API directly to check if photo exists
+      const url = `${this.options.supabaseUrl}/rest/v1/gallery_photos?id=eq.${photoId}&select=id`;
+      const res = await fetch(url, {
+        headers: {
+          'apikey': this.options.supabaseKey,
+          'Authorization': `Bearer ${this.options.supabaseKey}`,
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        console.warn(`[Upload] DB verify HTTP ${res.status} for ${photoId}`);
+        return true; // Don't block on verification errors — assume OK
+      }
+      const rows = await res.json();
+      if (Array.isArray(rows) && rows.length > 0) {
+        console.log(`[Upload] ✅ DB verified: photo ${photoId} exists`);
+        return true;
+      }
+      console.warn(`[Upload] ⚠️ DB verify: photo ${photoId} NOT found — will retry`);
+      return false;
+    } catch (err) {
+      console.warn(`[Upload] DB verify error for ${photoId}:`, err);
+      return true; // Don't block on verification errors
+    }
   }
 
   // ============================================================================
