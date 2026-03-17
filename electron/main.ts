@@ -66,6 +66,7 @@ const store = new Store<StoreSchema>({
 let mainWindow: BrowserWindow | null = null;
 let powerSaveId: number | null = null;
 let uploadManager: UploadManager | null = null;
+let pendingDeepLinkUrl: string | null = null;
 
 const isDev = process.argv.includes('--dev');
 const API_BASE_URL = process.env.VITE_API_BASE_URL || 'https://www.pix-online.com';
@@ -133,10 +134,9 @@ app.on('open-url', (_event, url) => {
   handleDeepLink(url);
 });
 
-function handleDeepLink(url: string): void {
+function sendDeepLinkPayload(url: string): void {
   try {
     const parsed = new URL(url);
-    // pix-uploader://upload?galleryId=... → hostname is "upload"
     const action = parsed.hostname || parsed.searchParams.get('action');
     const galleryId = parsed.searchParams.get('galleryId');
     const galleryName = parsed.searchParams.get('galleryName');
@@ -157,8 +157,28 @@ function handleDeepLink(url: string): void {
   }
 }
 
+function handleDeepLink(url: string): void {
+  if (mainWindow && mainWindow.webContents) {
+    // Window exists — send immediately
+    sendDeepLinkPayload(url);
+  } else {
+    // Window not ready yet (cold start) — queue it
+    pendingDeepLinkUrl = url;
+  }
+}
+
 app.whenReady().then(() => {
   createWindow();
+
+  // If a deep link arrived before the window was ready, send it now
+  if (pendingDeepLinkUrl && mainWindow) {
+    mainWindow.webContents.on('did-finish-load', () => {
+      if (pendingDeepLinkUrl) {
+        sendDeepLinkPayload(pendingDeepLinkUrl);
+        pendingDeepLinkUrl = null;
+      }
+    });
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
