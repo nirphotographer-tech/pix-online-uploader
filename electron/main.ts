@@ -11,6 +11,20 @@ import fs from 'fs';
 import Store from 'electron-store';
 import { UploadManager, UploadSessionInfo } from './uploadManager';
 
+// File-based logging for debugging
+const LOG_FILE = path.join(require("os").homedir(), "pix-uploader-debug.log");
+const origLog = console.log;
+const origErr = console.error;
+const origWarn = console.warn;
+function fileLog(...args: unknown[]) {
+  const line = `[${new Date().toISOString()}] ${args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ")}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch {}
+}
+console.log = (...args: unknown[]) => { origLog(...args); fileLog("LOG:", ...args); };
+console.error = (...args: unknown[]) => { origErr(...args); fileLog("ERR:", ...args); };
+console.warn = (...args: unknown[]) => { origWarn(...args); fileLog("WARN:", ...args); };
+fileLog("=== PIX UPLOADER STARTED ===");
+
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif', '.heic', '.heif'];
 
 function isImageFile(filePath: string): boolean {
@@ -260,7 +274,7 @@ function getUploadManager(): UploadManager {
       apiBaseUrl: API_BASE_URL,
       supabaseUrl: SUPABASE_URL,
       supabaseKey: SUPABASE_ANON_KEY,
-      concurrency: 3,
+      concurrency: 2,
       onSessionUpdate: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionUpdate', session);
       },

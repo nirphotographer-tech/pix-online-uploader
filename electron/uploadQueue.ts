@@ -67,11 +67,11 @@ interface ProcessResult {
 // Constants
 // ============================================================================
 
-const MAX_RETRIES = 5;
-const RETRY_DELAYS = [2000, 4000, 8000, 15000, 30000];
+const MAX_RETRIES = 7;
+const RETRY_DELAYS = [2000, 4000, 8000, 15000, 30000, 45000, 60000];
 const PRESIGN_TIMEOUT = 30_000;
 const R2_PUT_TIMEOUT = 180_000;  // 3 minutes for large files
-const PROCESS_TIMEOUT = 120_000; // 2 minutes for Sharp processing
+const PROCESS_TIMEOUT = 180_000; // 3 minutes for Sharp processing (incl Vercel cold start)
 
 // ============================================================================
 // Simple HTTP helpers using fetch (Node 22 / Electron 41)
@@ -128,23 +128,6 @@ async function httpPut(url: string, body: Buffer, contentType: string, timeoutMs
   }
 }
 
-async function httpPatch(url: string, body: object, supabaseKey: string): Promise<void> {
-  try {
-    await fetch(url, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': supabaseKey,
-        'Authorization': `Bearer ${supabaseKey}`,
-        'Prefer': 'return=minimal',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
-    });
-  } catch {
-    // Non-fatal
-  }
-}
 
 // ============================================================================
 // Upload Queue
@@ -232,7 +215,15 @@ export class UploadQueue {
       nextFile.status = 'uploading';
       this.activeUploads++;
 
-      this.uploadFile(nextFile)
+      // Small stagger between starting concurrent files to avoid thundering herd on API
+      const stagger = (this.activeUploads - 1) * 500;
+
+      const start = async () => {
+        if (stagger > 0) await this.sleep(stagger);
+        return this.uploadFile(nextFile);
+      };
+
+      start()
         .catch(() => { /* handled inside */ })
         .finally(() => {
           this.activeUploads--;
@@ -315,6 +306,7 @@ export class UploadQueue {
               fileName: file.name,
               fileSize: file.size,
               fastMode: true,
+              ...(this.options.folderId && { folderId: this.options.folderId }),
               ...(file.lastModified && { captureTime: new Date(file.lastModified).toISOString() }),
             },
             this.options.token,
@@ -335,14 +327,7 @@ export class UploadQueue {
           this.releaseProcessSlot();
         }
 
-        // ---- Step 4: Assign to folder ----
-        if (this.options.folderId && file.processResult.id && file.processResult.id !== 'unknown') {
-          await httpPatch(
-            `${this.options.supabaseUrl}/rest/v1/gallery_photos?id=eq.${file.processResult.id}`,
-            { folder_id: this.options.folderId },
-            this.options.supabaseKey,
-          );
-        }
+          // folder_id is set by the process API (folderId is sent in the request body)
 
         // ---- SUCCESS ----
         file.status = 'done';
@@ -389,7 +374,7 @@ export class UploadQueue {
   private releaseProcessSlot(): void {
     this.activeProcessCalls--;
     const next = this.processWaiters.shift();
-    if (next) setTimeout(next, 300);
+    if (next) setTimeout(next, 1500); // 1.5s gap between process calls to avoid overwhelming Vercel
   }
 
   // ============================================================================
@@ -462,6 +447,14 @@ export class UploadQueue {
     const failed = this.files.filter((f) => f.status === 'error').length;
 
     console.log(`[Upload] 📊 Complete: ${success} success, ${failed} failed, ${totalTime}s`);
+
+    // Log failed files for debugging
+    if (failed > 0) {
+      const failedFiles = this.files.filter((f) => f.status === 'error');
+      for (const f of failedFiles) {
+        console.error(`[Upload] ❌ Failed: ${f.name} — ${f.error}`);
+      }
+    }
 
     // Background responsive processing (fire and forget)
     this.triggerBackgroundProcessing();
