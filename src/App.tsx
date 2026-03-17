@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.3.1';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -93,8 +93,32 @@ export default function App() {
   useEffect(() => {
     if (!window.electronAPI) return;
 
-    // Throttle broadcast: max once every 2 seconds per session
+    // Keep one persistent channel per galleryId for broadcasting
+    const channels = new Map<string, ReturnType<typeof supabase.channel>>();
+    const channelReady = new Map<string, boolean>();
+    const pendingMessages = new Map<string, any>();
     const lastBroadcast = new Map<string, number>();
+
+    const getOrCreateChannel = (galleryId: string) => {
+      if (channels.has(galleryId)) return channels.get(galleryId)!;
+      
+      const channel = supabase.channel(`uploader-progress:${galleryId}`);
+      channels.set(galleryId, channel);
+      
+      channel.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channelReady.set(galleryId, true);
+          // Send any pending message
+          const pending = pendingMessages.get(galleryId);
+          if (pending) {
+            channel.send({ type: 'broadcast', event: 'upload-progress', payload: pending });
+            pendingMessages.delete(galleryId);
+          }
+        }
+      });
+      
+      return channel;
+    };
 
     const broadcastProgress = (session: UploadSessionInfo) => {
       const now = Date.now();
@@ -103,30 +127,27 @@ export default function App() {
       if (!isFinal && now - last < 2000) return; // throttle
       lastBroadcast.set(session.sessionId, now);
 
-      const channel = supabase.channel(`uploader-progress:${session.galleryId}`);
-      channel.subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          channel.send({
-            type: 'broadcast',
-            event: 'upload-progress',
-            payload: {
-              sessionId: session.sessionId,
-              galleryId: session.galleryId,
-              folderId: session.folderId,
-              folderName: session.folderName,
-              totalFiles: session.totalFiles,
-              completedFiles: session.completedFiles,
-              failedFiles: session.failedFiles,
-              percentage: session.percentage,
-              speed: session.speed,
-              eta: session.eta,
-              status: session.status,
-            },
-          });
-          // Unsubscribe after sending to avoid channel buildup
-          setTimeout(() => supabase.removeChannel(channel), 500);
-        }
-      });
+      const payload = {
+        sessionId: session.sessionId,
+        galleryId: session.galleryId,
+        folderId: session.folderId,
+        folderName: session.folderName,
+        totalFiles: session.totalFiles,
+        completedFiles: session.completedFiles,
+        failedFiles: session.failedFiles,
+        percentage: session.percentage,
+        speed: session.speed,
+        eta: session.eta,
+        status: session.status,
+      };
+
+      const channel = getOrCreateChannel(session.galleryId);
+      if (channelReady.get(session.galleryId)) {
+        channel.send({ type: 'broadcast', event: 'upload-progress', payload });
+      } else {
+        // Channel not ready yet — queue it
+        pendingMessages.set(session.galleryId, payload);
+      }
     };
 
     const unsubUpdate = window.electronAPI.upload.onSessionUpdate((session) => {
@@ -158,8 +179,11 @@ export default function App() {
     return () => {
       unsubUpdate();
       unsubComplete();
+      // Clean up all channels
+      channels.forEach((channel) => supabase.removeChannel(channel));
     };
   }, []);
+
 
 
   // Deep link handler — also queues pending link if auth isn't ready yet
