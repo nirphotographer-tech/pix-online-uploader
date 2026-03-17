@@ -79,6 +79,10 @@ export class UploadQueue {
   private lastEmitTime = 0;
   private presignCache = new Map<string, PresignResponse>();
   private presignInFlight = new Set<string>();
+  // Limit concurrent /api/r2/process calls to avoid overwhelming the server
+  private activeProcessCalls = 0;
+  private readonly maxProcessConcurrency = 4;
+  private processWaiters: Array<() => void> = [];
 
   constructor(options: QueueOptions) {
     this.options = options;
@@ -209,10 +213,16 @@ export class UploadQueue {
           file.abortController = new AbortController();
           await this.uploadToR2(file, presign.uploadUrl);
 
-          // Step 3: Process uploaded file
+          // Step 3: Process uploaded file (limited concurrency to avoid server overload)
           file.status = 'processing';
           this.emitProgress(file); // broadcast processing state
-          const processResult = await this.processFile(file, presign);
+          await this.acquireProcessSlot();
+          let processResult;
+          try {
+            processResult = await this.processFile(file, presign);
+          } finally {
+            this.releaseProcessSlot();
+          }
           file.processResult = processResult;
 
           // Step 4: Assign to correct folder via Supabase if folderId specified
@@ -246,6 +256,29 @@ export class UploadQueue {
       this.checkCompletion();
       this.processNext();
     }
+  }
+
+  /**
+   * Limits concurrent calls to the process API to avoid server overload.
+   * Upload to R2 can be highly concurrent, but processing is heavy server-side.
+   */
+  private acquireProcessSlot(): Promise<void> {
+    if (this.activeProcessCalls < this.maxProcessConcurrency) {
+      this.activeProcessCalls++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      this.processWaiters.push(() => {
+        this.activeProcessCalls++;
+        resolve();
+      });
+    });
+  }
+
+  private releaseProcessSlot(): void {
+    this.activeProcessCalls--;
+    const next = this.processWaiters.shift();
+    if (next) next();
   }
 
   private presignFile(file: FileEntry): Promise<PresignResponse> {
@@ -458,6 +491,20 @@ export class UploadQueue {
           });
         }
       );
+
+      // 90 second timeout for process API (server-side Sharp processing can be slow)
+      req.setTimeout(90000, () => {
+        console.error(`[Upload] Process TIMEOUT for ${file.name} (90s)`);
+        req.destroy();
+        reject(new Error('Process API timeout (90s)'));
+      });
+
+      // 90 second timeout for process API (server-side Sharp processing can be slow)
+      req.setTimeout(90000, () => {
+        console.error(`[Upload] Process TIMEOUT for ${file.name} (90s)`);
+        req.destroy();
+        reject(new Error('Process API timeout (90s)'));
+      });
 
       req.on('error', (err) => {
         console.error('[Upload] Process network error:', err.message);
