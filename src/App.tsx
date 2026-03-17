@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import LoginScreen from './screens/LoginScreen';
 import GallerySelectScreen from './screens/GallerySelectScreen';
+import FolderSelectScreen from './screens/FolderSelectScreen';
 import UploadScreen from './screens/UploadScreen';
+import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
+import type { UploadSessionInfo } from '../electron/preload';
 
-type Screen = 'login' | 'galleries' | 'upload';
+type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
 interface AuthState {
   token: string;
@@ -17,12 +20,20 @@ interface GalleryState {
   name: string;
 }
 
+interface FolderState {
+  id: string;
+  name: string;
+}
+
 export default function App() {
   const [screen, setScreen] = useState<Screen>('login');
   const [auth, setAuth] = useState<AuthState | null>(null);
   const [gallery, setGallery] = useState<GalleryState | null>(null);
+  const [folder, setFolder] = useState<FolderState | null>(null);
   const [loading, setLoading] = useState(true);
   const [galleryKey, setGalleryKey] = useState(0);
+  const [folderKey, setFolderKey] = useState(0);
+  const [uploadSessions, setUploadSessions] = useState<UploadSessionInfo[]>([]);
 
   // Restore session on mount
   useEffect(() => {
@@ -74,6 +85,40 @@ export default function App() {
     restoreSession();
   }, []);
 
+  // Listen to upload session events (persistent across all screens)
+  useEffect(() => {
+    if (!window.electronAPI) return;
+
+    const unsubUpdate = window.electronAPI.upload.onSessionUpdate((session) => {
+      setUploadSessions((prev) => {
+        const idx = prev.findIndex((s) => s.sessionId === session.sessionId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = session;
+          return updated;
+        }
+        return [...prev, session];
+      });
+    });
+
+    const unsubComplete = window.electronAPI.upload.onSessionComplete((session) => {
+      setUploadSessions((prev) => {
+        const idx = prev.findIndex((s) => s.sessionId === session.sessionId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = session;
+          return updated;
+        }
+        return [...prev, session];
+      });
+    });
+
+    return () => {
+      unsubUpdate();
+      unsubComplete();
+    };
+  }, []);
+
   // Deep link handler
   useEffect(() => {
     if (!window.electronAPI) return;
@@ -81,7 +126,8 @@ export default function App() {
     const unsubscribe = window.electronAPI.deepLink.onDeepLink((payload) => {
       if (payload.action === 'upload' && payload.galleryId && auth) {
         setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });
-        setScreen('upload');
+        setFolder(null);
+        setScreen('folders');
       }
     });
 
@@ -95,20 +141,51 @@ export default function App() {
 
   const handleSelectGallery = useCallback((galleryId: string, galleryName: string) => {
     setGallery({ id: galleryId, name: galleryName });
+    setFolder(null);
+    setScreen('folders');
+  }, []);
+
+  const handleSelectFolder = useCallback((folderId: string, folderName: string) => {
+    setFolder({ id: folderId, name: folderName });
     setScreen('upload');
+  }, []);
+
+  const handleBackToFolders = useCallback(() => {
+    setFolder(null);
+    setFolderKey((k) => k + 1);
+    setScreen('folders');
+  }, []);
+
+  const handleUploadStarted = useCallback(() => {
+    // After upload starts, navigate back to folders so user can upload more
+    setFolder(null);
+    setFolderKey((k) => k + 1);
+    setScreen('folders');
   }, []);
 
   const handleLogout = useCallback(async () => {
     await window.electronAPI.store.clearSession();
     setAuth(null);
     setGallery(null);
+    setFolder(null);
     setScreen('login');
   }, []);
 
   const handleBackToGalleries = useCallback(() => {
     setGallery(null);
+    setFolder(null);
     setGalleryKey((k) => k + 1);
     setScreen('galleries');
+  }, []);
+
+  const handleCancelSession = useCallback((sessionId: string) => {
+    window.electronAPI.upload.cancelSession(sessionId);
+    setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+  }, []);
+
+  const handleDismissSession = useCallback((sessionId: string) => {
+    window.electronAPI.upload.dismissSession(sessionId);
+    setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
   }, []);
 
   if (loading) {
@@ -123,26 +200,52 @@ export default function App() {
   }
 
   return (
-    <>
-      {screen === 'login' && <LoginScreen onLogin={handleLogin} />}
-      {screen === 'galleries' && auth && (
-        <GallerySelectScreen
-          key={galleryKey}
-          token={auth.token}
-          userId={auth.userId}
-          onSelectGallery={handleSelectGallery}
-          onLogout={handleLogout}
-          email={auth.email}
+    <div className="flex flex-col h-screen">
+      {/* Main content area */}
+      <div className="flex-1 overflow-hidden">
+        {screen === 'login' && <LoginScreen onLogin={handleLogin} />}
+        {screen === 'galleries' && auth && (
+          <GallerySelectScreen
+            key={galleryKey}
+            token={auth.token}
+            userId={auth.userId}
+            onSelectGallery={handleSelectGallery}
+            onLogout={handleLogout}
+            email={auth.email}
+          />
+        )}
+        {screen === 'folders' && auth && gallery && (
+          <FolderSelectScreen
+            key={folderKey}
+            galleryId={gallery.id}
+            galleryName={gallery.name}
+            token={auth.token}
+            userId={auth.userId}
+            onSelectFolder={handleSelectFolder}
+            onBack={handleBackToGalleries}
+          />
+        )}
+        {screen === 'upload' && auth && gallery && folder && (
+          <UploadScreen
+            galleryId={gallery.id}
+            galleryName={gallery.name}
+            folderId={folder.id}
+            folderName={folder.name}
+            token={auth.token}
+            onBack={handleBackToFolders}
+            onUploadStarted={handleUploadStarted}
+          />
+        )}
+      </div>
+
+      {/* Persistent upload status bar — visible on all screens when uploads are active */}
+      {screen !== 'login' && uploadSessions.length > 0 && (
+        <UploadStatusBar
+          sessions={uploadSessions}
+          onCancel={handleCancelSession}
+          onDismiss={handleDismissSession}
         />
       )}
-      {screen === 'upload' && auth && gallery && (
-        <UploadScreen
-          galleryId={gallery.id}
-          galleryName={gallery.name}
-          token={auth.token}
-          onBack={handleBackToGalleries}
-        />
-      )}
-    </>
+    </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { supabase } from '../lib/supabase';
 
 interface Gallery {
   id: string;
@@ -54,30 +55,88 @@ export default function GallerySelectScreen({
     setError('');
 
     try {
+      // Fetch galleries from both sources in parallel:
+      // 1. API (has extra data like cover_photo_url, photosByGallery)
+      // 2. Supabase directly (always up-to-date, catches newly created galleries)
       const apiBaseUrl = await window.electronAPI.config.getApiBaseUrl();
-      const response = await fetch(`${apiBaseUrl}/api/gallery/all`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Cache-Control': 'no-cache',
-        },
-      });
+      const cacheBuster = Date.now();
 
-      if (!response.ok) {
-        throw new Error(`שגיאה בטעינת הגלריות: ${response.status}`);
+      const [apiResult, supabaseResult] = await Promise.allSettled([
+        fetch(`${apiBaseUrl}/api/gallery/all?_t=${cacheBuster}`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Cache-Control': 'no-cache, no-store, must-revalidate',
+            Pragma: 'no-cache',
+          },
+        }).then(async (res) => {
+          if (!res.ok) throw new Error(`API error: ${res.status}`);
+          return res.json() as Promise<GalleryAllResponse>;
+        }),
+        supabase
+          .from('galleries')
+          .select('id, name, is_published, created_at, updated_at, user_id, cover_image, photo_count')
+          .eq('user_id', userId)
+          .order('created_at', { ascending: false }),
+      ]);
+
+      // Get API galleries
+      const apiData = apiResult.status === 'fulfilled' ? apiResult.value : null;
+      const apiGalleries = apiData?.galleries || [];
+      console.log('[GallerySelect] API galleries:', apiGalleries.length);
+
+      // Get Supabase galleries
+      const sbGalleries: Gallery[] =
+        supabaseResult.status === 'fulfilled' && !supabaseResult.value.error
+          ? (supabaseResult.value.data || [])
+          : [];
+      console.log('[GallerySelect] Supabase galleries:', sbGalleries.length);
+
+      // Merge: use API data as base, enrich with Supabase fields, add any missing galleries
+      const galleryMap = new Map<string, Gallery>();
+      const sbMap = new Map<string, Gallery>();
+      for (const g of sbGalleries) {
+        sbMap.set(g.id, g);
       }
-
-      const data: GalleryAllResponse = await response.json();
-      console.log('[GallerySelect] userId:', userId);
-      console.log('[GallerySelect] galleries count:', data.galleries?.length);
-      console.log('[GallerySelect] galleries:', JSON.stringify(data.galleries?.map(g => ({
-        id: g.id, name: g.name, is_published: g.is_published, user_id: g.user_id, photographer_id: g.photographer_id,
-      })), null, 2));
-      setGalleries(data.galleries || []);
-      setPhotoCounts(
-        Object.fromEntries(
-          Object.entries(data.photosByGallery || {}).map(([gid, photos]) => [gid, photos.length])
-        )
+      for (const g of apiGalleries) {
+        // Enrich API gallery with Supabase cover_image if API doesn't have one
+        const sb = sbMap.get(g.id);
+        if (sb?.cover_image && !g.cover_photo_url && !g.cover_image) {
+          g.cover_image = sb.cover_image;
+        }
+        galleryMap.set(g.id, g);
+      }
+      for (const g of sbGalleries) {
+        if (!galleryMap.has(g.id)) {
+          console.log('[GallerySelect] Adding gallery from Supabase:', g.name);
+          galleryMap.set(g.id, g);
+        }
+      }
+      const galleryList = Array.from(galleryMap.values()).sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       );
+      setGalleries(galleryList);
+      console.log('[GallerySelect] Total merged galleries:', galleryList.length);
+
+      // Get accurate photo counts directly from Supabase
+      // (the /api/gallery/all photosByGallery is limited to 1000 total rows)
+      const counts: Record<string, number> = {};
+      if (galleryList.length > 0) {
+        const countPromises = galleryList.map(async (g) => {
+          const { count, error: countError } = await supabase
+            .from('gallery_photos')
+            .select('*', { count: 'exact', head: true })
+            .eq('gallery_id', g.id);
+          if (!countError && count !== null) {
+            counts[g.id] = count;
+          } else {
+            // Fallback to photo_count from gallery or photosByGallery
+            const fromApi = (apiData?.photosByGallery?.[g.id] || []).length;
+            counts[g.id] = Math.max(g.photo_count || 0, fromApi);
+          }
+        });
+        await Promise.all(countPromises);
+      }
+      setPhotoCounts(counts);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'שגיאה בטעינת הגלריות');
     } finally {
@@ -156,9 +215,13 @@ export default function GallerySelectScreen({
                 <div className="w-full aspect-video rounded-lg bg-dark-bg mb-3 overflow-hidden">
                   {(gallery.cover_photo_url || gallery.cover_image) ? (
                     <img
-                      src={gallery.cover_photo_url || gallery.cover_image}
+                      src={(gallery.cover_photo_url || gallery.cover_image)!}
                       alt={gallery.name}
                       className="w-full h-full object-cover"
+                      onError={(e) => {
+                        // Hide broken image, show placeholder instead
+                        (e.target as HTMLImageElement).style.display = 'none';
+                      }}
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center">
@@ -187,7 +250,7 @@ export default function GallerySelectScreen({
                   )}
                 </div>
                 <p className="text-xs text-gray-500 mt-1">
-                  {gallery.photo_count ?? photoCounts[gallery.id] ?? 0} תמונות
+                  {photoCounts[gallery.id] ?? gallery.photo_count ?? 0} תמונות
                 </p>
               </button>
             ))}

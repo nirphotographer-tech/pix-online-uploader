@@ -7,8 +7,46 @@ import {
   powerSaveBlocker,
 } from 'electron';
 import path from 'path';
+import fs from 'fs';
 import Store from 'electron-store';
-import { UploadQueue, ProgressPayload, StatsPayload } from './uploadQueue';
+import { UploadManager, UploadSessionInfo } from './uploadManager';
+
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif', '.heic', '.heif'];
+
+function isImageFile(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return IMAGE_EXTENSIONS.includes(ext);
+}
+
+function getFileInfo(filePath: string): { path: string; name: string; size: number; type: string } {
+  const stat = fs.statSync(filePath);
+  const name = path.basename(filePath);
+  const ext = path.extname(filePath).toLowerCase().replace('.', '');
+  const mimeMap: Record<string, string> = {
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png',
+    webp: 'image/webp', tiff: 'image/tiff', tif: 'image/tiff',
+    heic: 'image/heic', heif: 'image/heif',
+  };
+  return { path: filePath, name, size: stat.size, type: mimeMap[ext] || 'image/jpeg' };
+}
+
+function scanFolderForImages(dirPath: string): string[] {
+  const results: string[] = [];
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        results.push(...scanFolderForImages(fullPath));
+      } else if (entry.isFile() && isImageFile(entry.name)) {
+        results.push(fullPath);
+      }
+    }
+  } catch (err) {
+    console.error('Error scanning folder:', dirPath, err);
+  }
+  return results;
+}
 
 interface StoreSchema {
   session: {
@@ -27,10 +65,12 @@ const store = new Store<StoreSchema>({
 
 let mainWindow: BrowserWindow | null = null;
 let powerSaveId: number | null = null;
-let uploadQueue: UploadQueue | null = null;
+let uploadManager: UploadManager | null = null;
 
 const isDev = process.argv.includes('--dev');
 const API_BASE_URL = process.env.VITE_API_BASE_URL || 'https://www.pix-online.com';
+const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://hxiwmsglhwvlcclwzzod.supabase.co';
+const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh4aXdtc2dsaHd2bGNjbHd6em9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ3MDAyOTAsImV4cCI6MjA4MDI3NjI5MH0.MjtgrJ3H-zGLdr5Xu722eJG2nYE_O_b44s4WhYa5KDk';
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -155,7 +195,7 @@ ipcMain.handle('dialog:openFiles', async () => {
       },
     ],
   });
-  return result.filePaths;
+  return result.filePaths.map(getFileInfo);
 });
 
 ipcMain.handle('dialog:openFolder', async () => {
@@ -163,7 +203,9 @@ ipcMain.handle('dialog:openFolder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory'],
   });
-  return result.filePaths;
+  if (result.filePaths.length === 0) return [];
+  const imagePaths = scanFolderForImages(result.filePaths[0]);
+  return imagePaths.map(getFileInfo);
 });
 
 // Power save blocker
@@ -186,49 +228,99 @@ ipcMain.handle('notification:show', (_event, title: string, body: string) => {
   new Notification({ title, body }).show();
 });
 
-// Upload queue
-ipcMain.handle(
-  'upload:start',
-  async (
-    _event,
-    files: Array<{ path: string; name: string; size: number; type: string }>,
-    galleryId: string,
-    token: string
-  ) => {
-    if (!mainWindow) return;
-
-    uploadQueue = new UploadQueue({
-      concurrency: 4,
+// Upload Manager (multi-session)
+function getUploadManager(): UploadManager {
+  if (!uploadManager) {
+    uploadManager = new UploadManager({
       apiBaseUrl: API_BASE_URL,
-      token,
-      galleryId,
-      onProgress: (progress: ProgressPayload) => {
-        mainWindow?.webContents.send('upload:progress', progress);
+      supabaseUrl: SUPABASE_URL,
+      supabaseKey: SUPABASE_ANON_KEY,
+      concurrency: 8,
+      onSessionUpdate: (session: UploadSessionInfo) => {
+        mainWindow?.webContents.send('upload:sessionUpdate', session);
       },
-      onFileComplete: (fileId: string, success: boolean, error?: string) => {
-        mainWindow?.webContents.send('upload:fileComplete', { fileId, success, error });
+      onSessionComplete: (session: UploadSessionInfo) => {
+        mainWindow?.webContents.send('upload:sessionComplete', session);
+        // Show notification
+        const msg = session.failedFiles > 0
+          ? `${session.completedFiles} מתוך ${session.totalFiles} תמונות הועלו בהצלחה`
+          : `${session.completedFiles} תמונות הועלו בהצלחה`;
+        new Notification({
+          title: `${session.galleryName} – ההעלאה הסתיימה`,
+          body: msg,
+        }).show();
       },
-      onAllComplete: (stats: StatsPayload) => {
-        mainWindow?.webContents.send('upload:allComplete', stats);
+      onAllSessionsComplete: () => {
+        mainWindow?.webContents.send('upload:allSessionsComplete');
+        // Allow sleep when all sessions are done
+        if (powerSaveId !== null) {
+          powerSaveBlocker.stop(powerSaveId);
+          powerSaveId = null;
+        }
       },
     });
+  }
+  return uploadManager;
+}
 
-    uploadQueue.addFiles(files);
-    uploadQueue.start();
+ipcMain.handle(
+  'upload:startSession',
+  async (
+    _event,
+    sessionId: string,
+    files: Array<{ path: string; name: string; size: number; type: string }>,
+    galleryId: string,
+    galleryName: string,
+    folderId: string,
+    folderName: string,
+    token: string
+  ) => {
+    // Prevent sleep while uploading
+    if (powerSaveId === null) {
+      powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
+    }
+
+    // Resolve file sizes from disk if missing
+    const resolvedFiles = files.map((f) => {
+      if (!f.size || f.size === 0) {
+        try {
+          const stat = fs.statSync(f.path);
+          return { ...f, size: stat.size };
+        } catch {
+          console.error(`[Upload] Cannot stat file: ${f.path}`);
+          return f;
+        }
+      }
+      return f;
+    });
+
+    const manager = getUploadManager();
+    manager.startSession(
+      sessionId,
+      resolvedFiles,
+      galleryId,
+      galleryName,
+      folderId,
+      folderName,
+      token
+    );
   }
 );
 
-ipcMain.handle('upload:pause', () => {
-  uploadQueue?.pause();
+ipcMain.handle('upload:cancelSession', (_event, sessionId: string) => {
+  uploadManager?.cancelSession(sessionId);
 });
 
-ipcMain.handle('upload:resume', () => {
-  uploadQueue?.resume();
+ipcMain.handle('upload:dismissSession', (_event, sessionId: string) => {
+  uploadManager?.dismissSession(sessionId);
 });
 
-ipcMain.handle('upload:cancel', () => {
-  uploadQueue?.cancel();
-  uploadQueue = null;
+ipcMain.handle('upload:getSessions', () => {
+  return uploadManager?.getAllSessions() || [];
+});
+
+ipcMain.handle('upload:hasActiveSessions', () => {
+  return uploadManager?.hasActiveSessions() || false;
 });
 
 // API base URL

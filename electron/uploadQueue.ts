@@ -11,8 +11,11 @@ interface FileEntry {
   type: string;
   status: 'pending' | 'uploading' | 'processing' | 'done' | 'error';
   loaded: number;
+  peakLoaded: number; // highest loaded value - never goes down
   error?: string;
   abortController?: AbortController;
+  lastModified?: number;
+  processResult?: ProcessResult;
 }
 
 interface QueueOptions {
@@ -20,6 +23,9 @@ interface QueueOptions {
   apiBaseUrl: string;
   token: string;
   galleryId: string;
+  folderId?: string;
+  supabaseUrl: string;
+  supabaseKey: string;
   onProgress: (progress: ProgressPayload) => void;
   onFileComplete: (fileId: string, success: boolean, error?: string) => void;
   onAllComplete: (stats: StatsPayload) => void;
@@ -51,6 +57,15 @@ interface PresignResponse {
   baseKey: string;
 }
 
+interface ProcessResult {
+  id: string;
+  storageKey: string;
+  needsResponsiveProcessing?: boolean;
+}
+
+const MAX_RETRIES = 3;
+const RETRY_DELAYS = [1000, 3000, 5000]; // ms
+
 export class UploadQueue {
   private files: FileEntry[] = [];
   private options: QueueOptions;
@@ -64,12 +79,23 @@ export class UploadQueue {
 
   constructor(options: QueueOptions) {
     this.options = options;
+    console.log(`[Upload] Queue created: galleryId=${options.galleryId}, folderId=${options.folderId || 'NONE'}, concurrency=${options.concurrency}`);
   }
 
   addFiles(
     files: Array<{ path: string; name: string; size: number; type: string }>
   ): void {
     for (const file of files) {
+      console.log(`[Upload] addFiles: name=${file.name}, path=${file.path}, size=${file.size}`);
+      // Get file lastModified time from disk
+      let lastModified: number | undefined;
+      try {
+        const stat = fs.statSync(file.path);
+        lastModified = stat.mtimeMs;
+      } catch {
+        // ignore
+      }
+
       this.files.push({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
         path: file.path,
@@ -78,6 +104,8 @@ export class UploadQueue {
         type: file.type || 'image/jpeg',
         status: 'pending',
         loaded: 0,
+        peakLoaded: 0,
+        lastModified,
       });
     }
   }
@@ -128,24 +156,53 @@ export class UploadQueue {
   }
 
   private async uploadFile(file: FileEntry): Promise<void> {
+    let lastError: Error | null = null;
+
     try {
-      // Step 1: Get presigned URL
-      const presign = await this.presignFile(file);
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          if (attempt > 1) {
+            console.log(`[Upload] Retry ${attempt}/${MAX_RETRIES} for ${file.name}`);
+            await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 2]));
+            file.loaded = 0;
+          }
+          console.log(`[Upload] === Starting upload: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB) ===`);
 
-      // Step 2: Upload to R2
-      file.abortController = new AbortController();
-      await this.uploadToR2(file, presign.uploadUrl);
+          // Step 1: Get presigned URL
+          const presign = await this.presignFile(file);
 
-      // Step 3: Process uploaded file
-      file.status = 'processing';
-      await this.processFile(file, presign);
+          // Step 2: Upload to R2
+          file.abortController = new AbortController();
+          await this.uploadToR2(file, presign.uploadUrl);
 
-      file.status = 'done';
-      this.options.onFileComplete(file.id, true);
-    } catch (err) {
+          // Step 3: Process uploaded file
+          file.status = 'processing';
+          const processResult = await this.processFile(file, presign);
+          file.processResult = processResult;
+
+          // Step 4: Assign to correct folder via Supabase if folderId specified
+          if (this.options.folderId && processResult.id && processResult.id !== 'unknown') {
+            await this.updatePhotoFolder(processResult.id, this.options.folderId);
+          }
+
+          file.status = 'done';
+          console.log(`[Upload] === DONE: ${file.name} ===`);
+          this.options.onFileComplete(file.id, true);
+          return; // success — exit retry loop
+        } catch (err) {
+          lastError = err instanceof Error ? err : new Error('שגיאה לא ידועה');
+          if (this.isCancelled) break; // don't retry if cancelled
+          if (attempt < MAX_RETRIES) {
+            console.warn(`[Upload] Attempt ${attempt} failed for ${file.name}: ${lastError.message}`);
+          }
+        }
+      }
+
+      // All retries exhausted
       if (!this.isCancelled) {
         file.status = 'error';
-        file.error = err instanceof Error ? err.message : 'שגיאה לא ידועה';
+        file.error = lastError?.message || 'שגיאה לא ידועה';
+        console.error(`[Upload] === FAILED after ${MAX_RETRIES} attempts: ${file.name} — ${file.error} ===`);
         this.options.onFileComplete(file.id, false, file.error);
       }
     } finally {
@@ -157,16 +214,23 @@ export class UploadQueue {
 
   private presignFile(file: FileEntry): Promise<PresignResponse> {
     return new Promise((resolve, reject) => {
+      const captureTime = file.lastModified
+        ? new Date(file.lastModified).toISOString()
+        : undefined;
+
       const body = JSON.stringify({
         fileName: file.name,
         contentType: file.type,
         fileSize: file.size,
         galleryId: this.options.galleryId,
+        ...(captureTime && { captureTime }),
       });
 
       const url = new URL(`${this.options.apiBaseUrl}/api/r2/presign`);
       const isHttps = url.protocol === 'https:';
       const httpModule = isHttps ? https : http;
+
+      console.log(`[Upload] Presigning ${file.name} for gallery ${this.options.galleryId}`);
 
       const req = httpModule.request(
         {
@@ -186,18 +250,32 @@ export class UploadQueue {
           res.on('end', () => {
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
               try {
-                resolve(JSON.parse(data) as PresignResponse);
+                const parsed = JSON.parse(data);
+                // API returns { success: true, data: { uploadUrl, key, baseKey, ... } }
+                const presignData = parsed.data || parsed;
+                if (!presignData.uploadUrl || !presignData.key) {
+                  console.error('[Upload] Presign response missing fields:', JSON.stringify(parsed));
+                  reject(new Error('תגובה חסרה מהשרת - אין קישור העלאה'));
+                  return;
+                }
+                console.log(`[Upload] Presign OK: key=${presignData.key}`);
+                resolve(presignData as PresignResponse);
               } catch {
+                console.error('[Upload] Presign parse error, raw:', data);
                 reject(new Error('תגובה לא תקינה מהשרת'));
               }
             } else {
-              reject(new Error(`שגיאה בקבלת קישור העלאה: ${res.statusCode}`));
+              console.error(`[Upload] Presign failed: ${res.statusCode}`, data);
+              reject(new Error(`שגיאה בקבלת קישור העלאה: ${res.statusCode} - ${data}`));
             }
           });
         }
       );
 
-      req.on('error', (err) => reject(err));
+      req.on('error', (err) => {
+        console.error('[Upload] Presign network error:', err.message);
+        reject(err);
+      });
       req.write(body);
       req.end();
     });
@@ -205,6 +283,7 @@ export class UploadQueue {
 
   private uploadToR2(file: FileEntry, uploadUrl: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      console.log(`[Upload] uploadToR2: file.path=${file.path}, uploadUrl=${uploadUrl?.substring(0, 80)}...`);
       const fileBuffer = fs.readFileSync(file.path);
       const url = new URL(uploadUrl);
       const isHttps = url.protocol === 'https:';
@@ -226,10 +305,12 @@ export class UploadQueue {
           res.on('data', (chunk: Buffer) => (data += chunk.toString()));
           res.on('end', () => {
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+              console.log(`[Upload] PUT to R2 OK for ${file.name} (status ${res.statusCode})`);
               file.loaded = file.size;
               this.emitProgress(file);
               resolve();
             } else {
+              console.error(`[Upload] PUT to R2 FAILED for ${file.name}: ${res.statusCode}`, data);
               reject(new Error(`שגיאה בהעלאת קובץ: ${res.statusCode} - ${data}`));
             }
           });
@@ -275,8 +356,12 @@ export class UploadQueue {
   private processFile(
     file: FileEntry,
     presign: PresignResponse
-  ): Promise<void> {
+  ): Promise<ProcessResult> {
     return new Promise((resolve, reject) => {
+      const captureTime = file.lastModified
+        ? new Date(file.lastModified).toISOString()
+        : undefined;
+
       const body = JSON.stringify({
         key: presign.key,
         baseKey: presign.baseKey,
@@ -284,11 +369,14 @@ export class UploadQueue {
         fileName: file.name,
         fileSize: file.size,
         fastMode: true,
+        ...(captureTime && { captureTime }),
       });
 
       const url = new URL(`${this.options.apiBaseUrl}/api/r2/process`);
       const isHttps = url.protocol === 'https:';
       const httpModule = isHttps ? https : http;
+
+      console.log(`[Upload] Processing ${file.name} (key: ${presign.key}, folderId: ${this.options.folderId || 'NONE'})`);
 
       const req = httpModule.request(
         {
@@ -307,15 +395,94 @@ export class UploadQueue {
           res.on('data', (chunk: Buffer) => (data += chunk.toString()));
           res.on('end', () => {
             if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              resolve();
+              try {
+                const parsed = JSON.parse(data);
+                if (parsed.success === false) {
+                  console.error(`[Upload] Process API returned success:false for ${file.name}:`, parsed.error);
+                  reject(new Error(`שגיאה בעיבוד: ${parsed.error || 'unknown'}`));
+                  return;
+                }
+                console.log(`[Upload] Process response for ${file.name}:`, JSON.stringify(parsed.data || parsed).substring(0, 300));
+                const result: ProcessResult = {
+                  id: parsed.data?.id || 'unknown',
+                  storageKey: parsed.data?.storageKey || presign.key,
+                  needsResponsiveProcessing: parsed.data?.needsResponsiveProcessing ?? true,
+                };
+                console.log(`[Upload] Process OK for ${file.name}: photo id=${result.id}`);
+                resolve(result);
+              } catch {
+                // If response isn't JSON but status is 2xx, still OK
+                console.log(`[Upload] Process OK for ${file.name} (non-JSON response)`);
+                resolve({ id: 'unknown', storageKey: presign.key, needsResponsiveProcessing: true });
+              }
             } else {
-              reject(new Error(`שגיאה בעיבוד הקובץ: ${res.statusCode}`));
+              console.error(`[Upload] Process FAILED for ${file.name}: ${res.statusCode}`, data);
+              reject(new Error(`שגיאה בעיבוד הקובץ: ${res.statusCode} - ${data}`));
             }
           });
         }
       );
 
-      req.on('error', (err) => reject(err));
+      req.on('error', (err) => {
+        console.error('[Upload] Process network error:', err.message);
+        reject(err);
+      });
+      req.write(body);
+      req.end();
+    });
+  }
+
+  /**
+   * Update photo's folder_id directly via Supabase REST API
+   * Called after process step succeeds to assign photo to the correct folder
+   */
+  private updatePhotoFolder(photoId: string, folderId: string): Promise<void> {
+    return new Promise((resolve) => {
+      const body = JSON.stringify({ folder_id: folderId });
+
+      // PATCH gallery_photos where id = photoId
+      const url = new URL(
+        `${this.options.supabaseUrl}/rest/v1/gallery_photos?id=eq.${photoId}`
+      );
+      const isHttps = url.protocol === 'https:';
+      const httpModule = isHttps ? https : http;
+
+      console.log(`[Upload] Updating folder for photo ${photoId} → ${folderId}`);
+
+      const req = httpModule.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: url.pathname + url.search,
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+            apikey: this.options.supabaseKey,
+            Authorization: `Bearer ${this.options.supabaseKey}`,
+            Prefer: 'return=minimal',
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+          res.on('end', () => {
+            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+              console.log(`[Upload] ✅ Folder updated for photo ${photoId}`);
+              resolve();
+            } else {
+              console.warn(`[Upload] ⚠️ Folder update failed for photo ${photoId}: ${res.statusCode}`, data);
+              // Non-fatal: photo uploaded OK, just folder assignment failed
+              resolve();
+            }
+          });
+        }
+      );
+
+      req.on('error', (err) => {
+        console.warn(`[Upload] ⚠️ Folder update error for ${photoId}:`, err.message);
+        resolve(); // non-fatal
+      });
       req.write(body);
       req.end();
     });
@@ -323,7 +490,12 @@ export class UploadQueue {
 
   private emitProgress(currentFile: FileEntry): void {
     const now = Date.now();
-    const totalLoaded = this.files.reduce((sum, f) => sum + f.loaded, 0);
+
+    // Update peakLoaded - never goes down
+    currentFile.peakLoaded = Math.max(currentFile.peakLoaded, currentFile.loaded);
+
+    // For total progress: use peakLoaded so retries don't cause progress to go backwards
+    const totalLoaded = this.files.reduce((sum, f) => sum + f.peakLoaded, 0);
     const totalSize = this.files.reduce((sum, f) => sum + f.size, 0);
 
     // Calculate speed every 500ms
@@ -365,6 +537,10 @@ export class UploadQueue {
       const totalTime = Math.round((Date.now() - this.startTime) / 1000);
       const success = this.files.filter((f) => f.status === 'done').length;
       const failed = this.files.filter((f) => f.status === 'error').length;
+
+      // 🚀 Trigger background processing for responsive versions (non-blocking)
+      this.triggerBackgroundProcessing();
+
       this.options.onAllComplete({
         total: this.files.length,
         success,
@@ -372,5 +548,83 @@ export class UploadQueue {
         totalTime,
       });
     }
+  }
+
+  /**
+   * Background processing: PUT /api/r2/process for responsive image versions
+   * Runs after all uploads complete, 2 at a time, non-blocking
+   */
+  private triggerBackgroundProcessing(): void {
+    const photosToProcess = this.files
+      .filter((f) => f.status === 'done' && f.processResult?.needsResponsiveProcessing)
+      .map((f) => f.processResult!);
+
+    if (photosToProcess.length === 0) {
+      console.log('[Upload] No photos need background processing');
+      return;
+    }
+
+    console.log(`[Upload] 🔄 Starting background processing for ${photosToProcess.length} photos...`);
+    const CONCURRENT = 2;
+
+    const processQueue = async () => {
+      for (let i = 0; i < photosToProcess.length; i += CONCURRENT) {
+        const batch = photosToProcess.slice(i, i + CONCURRENT);
+        await Promise.all(batch.map((photo) => this.backgroundProcess(photo)));
+      }
+      console.log(`[Upload] ✅ Background processing complete for all ${photosToProcess.length} photos`);
+    };
+
+    // Fire and forget
+    processQueue().catch((err) => {
+      console.error('[Upload] Background processing error:', err);
+    });
+  }
+
+  private backgroundProcess(photo: ProcessResult): Promise<void> {
+    return new Promise((resolve) => {
+      const body = JSON.stringify({
+        photoId: photo.id,
+        galleryId: this.options.galleryId,
+        storageKey: photo.storageKey,
+      });
+
+      const url = new URL(`${this.options.apiBaseUrl}/api/r2/process`);
+      const isHttps = url.protocol === 'https:';
+      const httpModule = isHttps ? https : http;
+
+      const req = httpModule.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (isHttps ? 443 : 80),
+          path: url.pathname,
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+            Authorization: `Bearer ${this.options.token}`,
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
+          res.on('end', () => {
+            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+              console.log(`[Upload] ✅ Background process OK for photo ${photo.id}`);
+            } else {
+              console.warn(`[Upload] ⚠️ Background process failed for photo ${photo.id}: ${res.statusCode}`);
+            }
+            resolve(); // always resolve — background processing is optional
+          });
+        }
+      );
+
+      req.on('error', (err) => {
+        console.warn(`[Upload] ⚠️ Background process error for ${photo.id}:`, err.message);
+        resolve(); // non-fatal
+      });
+      req.write(body);
+      req.end();
+    });
   }
 }

@@ -7,30 +7,21 @@ export interface UploadFileInfo {
   type: string;
 }
 
-export interface UploadProgress {
-  fileId: string;
-  fileName: string;
-  loaded: number;
-  total: number;
+export interface UploadSessionInfo {
+  sessionId: string;
+  galleryId: string;
+  galleryName: string;
+  folderId: string;
+  folderName: string;
+  totalFiles: number;
+  completedFiles: number;
+  failedFiles: number;
+  totalSize: number;
+  totalLoaded: number;
   percentage: number;
   speed: number;
-  totalLoaded: number;
-  totalSize: number;
-  totalPercentage: number;
   eta: number;
-}
-
-export interface UploadFileResult {
-  fileId: string;
-  success: boolean;
-  error?: string;
-}
-
-export interface UploadStats {
-  total: number;
-  success: number;
-  failed: number;
-  totalTime: number;
+  status: 'uploading' | 'done' | 'error';
 }
 
 export interface DeepLinkPayload {
@@ -56,8 +47,8 @@ export interface ElectronAPI {
     clearSession: () => Promise<void>;
   };
   dialog: {
-    openFiles: () => Promise<string[]>;
-    openFolder: () => Promise<string[]>;
+    openFiles: () => Promise<UploadFileInfo[]>;
+    openFolder: () => Promise<UploadFileInfo[]>;
   };
   power: {
     preventSleep: () => Promise<number>;
@@ -67,13 +58,22 @@ export interface ElectronAPI {
     show: (title: string, body: string) => Promise<void>;
   };
   upload: {
-    start: (files: UploadFileInfo[], galleryId: string, token: string) => Promise<void>;
-    pause: () => Promise<void>;
-    resume: () => Promise<void>;
-    cancel: () => Promise<void>;
-    onProgress: (callback: (progress: UploadProgress) => void) => () => void;
-    onFileComplete: (callback: (result: UploadFileResult) => void) => () => void;
-    onAllComplete: (callback: (stats: UploadStats) => void) => () => void;
+    startSession: (
+      sessionId: string,
+      files: UploadFileInfo[],
+      galleryId: string,
+      galleryName: string,
+      folderId: string,
+      folderName: string,
+      token: string
+    ) => Promise<void>;
+    cancelSession: (sessionId: string) => Promise<void>;
+    dismissSession: (sessionId: string) => Promise<void>;
+    getSessions: () => Promise<UploadSessionInfo[]>;
+    hasActiveSessions: () => Promise<boolean>;
+    onSessionUpdate: (callback: (session: UploadSessionInfo) => void) => () => void;
+    onSessionComplete: (callback: (session: UploadSessionInfo) => void) => () => void;
+    onAllSessionsComplete: (callback: () => void) => () => void;
   };
   config: {
     getApiBaseUrl: () => Promise<string>;
@@ -101,28 +101,37 @@ const electronAPI: ElectronAPI = {
     show: (title, body) => ipcRenderer.invoke('notification:show', title, body),
   },
   upload: {
-    start: (files, galleryId, token) =>
-      ipcRenderer.invoke('upload:start', files, galleryId, token),
-    pause: () => ipcRenderer.invoke('upload:pause'),
-    resume: () => ipcRenderer.invoke('upload:resume'),
-    cancel: () => ipcRenderer.invoke('upload:cancel'),
-    onProgress: (callback) => {
-      const handler = (_event: Electron.IpcRendererEvent, progress: UploadProgress) =>
-        callback(progress);
-      ipcRenderer.on('upload:progress', handler);
-      return () => ipcRenderer.removeListener('upload:progress', handler);
+    startSession: (sessionId, files, galleryId, galleryName, folderId, folderName, token) =>
+      ipcRenderer.invoke(
+        'upload:startSession',
+        sessionId,
+        files,
+        galleryId,
+        galleryName,
+        folderId,
+        folderName,
+        token
+      ),
+    cancelSession: (sessionId) => ipcRenderer.invoke('upload:cancelSession', sessionId),
+    dismissSession: (sessionId) => ipcRenderer.invoke('upload:dismissSession', sessionId),
+    getSessions: () => ipcRenderer.invoke('upload:getSessions'),
+    hasActiveSessions: () => ipcRenderer.invoke('upload:hasActiveSessions'),
+    onSessionUpdate: (callback) => {
+      const handler = (_event: Electron.IpcRendererEvent, session: UploadSessionInfo) =>
+        callback(session);
+      ipcRenderer.on('upload:sessionUpdate', handler);
+      return () => ipcRenderer.removeListener('upload:sessionUpdate', handler);
     },
-    onFileComplete: (callback) => {
-      const handler = (_event: Electron.IpcRendererEvent, result: UploadFileResult) =>
-        callback(result);
-      ipcRenderer.on('upload:fileComplete', handler);
-      return () => ipcRenderer.removeListener('upload:fileComplete', handler);
+    onSessionComplete: (callback) => {
+      const handler = (_event: Electron.IpcRendererEvent, session: UploadSessionInfo) =>
+        callback(session);
+      ipcRenderer.on('upload:sessionComplete', handler);
+      return () => ipcRenderer.removeListener('upload:sessionComplete', handler);
     },
-    onAllComplete: (callback) => {
-      const handler = (_event: Electron.IpcRendererEvent, stats: UploadStats) =>
-        callback(stats);
-      ipcRenderer.on('upload:allComplete', handler);
-      return () => ipcRenderer.removeListener('upload:allComplete', handler);
+    onAllSessionsComplete: (callback) => {
+      const handler = () => callback();
+      ipcRenderer.on('upload:allSessionsComplete', handler);
+      return () => ipcRenderer.removeListener('upload:allSessionsComplete', handler);
     },
   },
   config: {
