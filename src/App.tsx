@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -89,8 +89,45 @@ export default function App() {
   }, []);
 
   // Listen to upload session events (persistent across all screens)
+  // Also broadcast progress to Supabase Realtime so the web app can show it
   useEffect(() => {
     if (!window.electronAPI) return;
+
+    // Throttle broadcast: max once every 2 seconds per session
+    const lastBroadcast = new Map<string, number>();
+
+    const broadcastProgress = (session: UploadSessionInfo) => {
+      const now = Date.now();
+      const last = lastBroadcast.get(session.sessionId) || 0;
+      const isFinal = session.status === 'done' || session.status === 'error';
+      if (!isFinal && now - last < 2000) return; // throttle
+      lastBroadcast.set(session.sessionId, now);
+
+      const channel = supabase.channel(`uploader-progress:${session.galleryId}`);
+      channel.subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channel.send({
+            type: 'broadcast',
+            event: 'upload-progress',
+            payload: {
+              sessionId: session.sessionId,
+              galleryId: session.galleryId,
+              folderId: session.folderId,
+              folderName: session.folderName,
+              totalFiles: session.totalFiles,
+              completedFiles: session.completedFiles,
+              failedFiles: session.failedFiles,
+              percentage: session.percentage,
+              speed: session.speed,
+              eta: session.eta,
+              status: session.status,
+            },
+          });
+          // Unsubscribe after sending to avoid channel buildup
+          setTimeout(() => supabase.removeChannel(channel), 500);
+        }
+      });
+    };
 
     const unsubUpdate = window.electronAPI.upload.onSessionUpdate((session) => {
       setUploadSessions((prev) => {
@@ -102,6 +139,7 @@ export default function App() {
         }
         return [...prev, session];
       });
+      broadcastProgress(session);
     });
 
     const unsubComplete = window.electronAPI.upload.onSessionComplete((session) => {
@@ -114,6 +152,7 @@ export default function App() {
         }
         return [...prev, session];
       });
+      broadcastProgress(session);
     });
 
     return () => {
@@ -121,6 +160,7 @@ export default function App() {
       unsubComplete();
     };
   }, []);
+
 
   // Deep link handler — also queues pending link if auth isn't ready yet
   useEffect(() => {
