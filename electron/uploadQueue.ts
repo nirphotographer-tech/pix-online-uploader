@@ -177,6 +177,7 @@ export class UploadQueue {
 
           // Step 3: Process uploaded file
           file.status = 'processing';
+          this.emitProgress(file); // broadcast processing state
           const processResult = await this.processFile(file, presign);
           file.processResult = processResult;
 
@@ -186,6 +187,7 @@ export class UploadQueue {
           }
 
           file.status = 'done';
+          this.emitProgress(file); // broadcast done state — weighted progress now 100% for this file
           console.log(`[Upload] === DONE: ${file.name} ===`);
           this.options.onFileComplete(file.id, true);
           return; // success — exit retry loop
@@ -511,6 +513,28 @@ export class UploadQueue {
     const eta =
       this.currentSpeed > 0 ? Math.round(remaining / this.currentSpeed) : 0;
 
+    // Weighted progress: upload bytes = 80% of progress, processing = 20%
+    // This prevents the progress bar from jumping to 100% before processing is done
+    const UPLOAD_WEIGHT = 0.8;
+    let weightedProgress = 0;
+
+    for (const f of this.files) {
+      const uploadShare = f.size > 0 ? (f.peakLoaded / f.size) : 0;
+      let fileProgress: number;
+      if (f.status === 'done') {
+        fileProgress = 1.0; // fully done
+      } else if (f.status === 'processing') {
+        fileProgress = UPLOAD_WEIGHT; // upload done, processing in progress
+      } else {
+        fileProgress = uploadShare * UPLOAD_WEIGHT; // uploading
+      }
+      weightedProgress += fileProgress * f.size;
+    }
+
+    const weightedPercentage = totalSize > 0
+      ? Math.round((weightedProgress / totalSize) * 100)
+      : 0;
+
     this.options.onProgress({
       fileId: currentFile.id,
       fileName: currentFile.name,
@@ -522,9 +546,7 @@ export class UploadQueue {
       speed: this.currentSpeed,
       totalLoaded,
       totalSize,
-      totalPercentage: totalSize > 0
-        ? Math.round((totalLoaded / totalSize) * 100)
-        : 0,
+      totalPercentage: Math.min(weightedPercentage, 99), // never show 100% until truly done
       eta,
     });
   }

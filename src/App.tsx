@@ -120,12 +120,18 @@ export default function App() {
       return channel;
     };
 
+    const lastCompletedFiles = new Map<string, number>();
+
     const broadcastProgress = (session: UploadSessionInfo) => {
       const now = Date.now();
       const last = lastBroadcast.get(session.sessionId) || 0;
       const isFinal = session.status === 'done' || session.status === 'error';
-      if (!isFinal && now - last < 2000) return; // throttle
+      const prevCompleted = lastCompletedFiles.get(session.sessionId) || 0;
+      const fileJustCompleted = session.completedFiles > prevCompleted;
+      // Allow through if: final state, file just completed, or 1s since last broadcast
+      if (!isFinal && !fileJustCompleted && now - last < 1000) return;
       lastBroadcast.set(session.sessionId, now);
+      lastCompletedFiles.set(session.sessionId, session.completedFiles);
 
       const payload = {
         sessionId: session.sessionId,
