@@ -126,8 +126,15 @@ export default function App() {
     const unsubscribe = window.electronAPI.deepLink.onDeepLink((payload) => {
       if (payload.action === 'upload' && payload.galleryId && auth) {
         setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });
-        setFolder(null);
-        setScreen('folders');
+
+        // If deep link includes a folderId, skip folder selection and go straight to upload
+        if (payload.folderId) {
+          setFolder({ id: payload.folderId, name: payload.folderName || 'תיקייה' });
+          setScreen('upload');
+        } else {
+          setFolder(null);
+          setScreen('folders');
+        }
       }
     });
 
