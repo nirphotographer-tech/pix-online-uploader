@@ -260,7 +260,7 @@ function getUploadManager(): UploadManager {
       apiBaseUrl: API_BASE_URL,
       supabaseUrl: SUPABASE_URL,
       supabaseKey: SUPABASE_ANON_KEY,
-      concurrency: 8,
+      concurrency: 5,
       onSessionUpdate: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionUpdate', session);
       },

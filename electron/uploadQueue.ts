@@ -81,7 +81,7 @@ export class UploadQueue {
   private presignInFlight = new Set<string>();
   // Limit concurrent /api/r2/process calls to avoid overwhelming the server
   private activeProcessCalls = 0;
-  private readonly maxProcessConcurrency = 3;
+  private readonly maxProcessConcurrency = 2;
   private processWaiters: Array<() => void> = [];
 
   constructor(options: QueueOptions) {
@@ -283,7 +283,8 @@ export class UploadQueue {
   private releaseProcessSlot(): void {
     this.activeProcessCalls--;
     const next = this.processWaiters.shift();
-    if (next) next();
+    // Small stagger delay between process calls to avoid overwhelming the server
+    if (next) setTimeout(next, 500);
   }
 
   private presignFile(file: FileEntry): Promise<PresignResponse> {
@@ -345,6 +346,14 @@ export class UploadQueue {
           });
         }
       );
+
+
+        // 30 second timeout for presign API
+        req.setTimeout(30000, () => {
+          console.error(`[Upload] Presign TIMEOUT for ${file.name} (30s)`);
+          req.destroy();
+          reject(new Error('Presign API timeout (30s)'));
+        });
 
       req.on('error', (err) => {
         console.error('[Upload] Presign network error:', err.message);
@@ -420,8 +429,19 @@ export class UploadQueue {
         }
       };
 
-      req.on('drain', writeChunk);
-      req.on('error', (err) => reject(err));
+
+        // 120 second timeout for R2 PUT upload (large files can take time)
+        req.setTimeout(120000, () => {
+          console.error(`[Upload] R2 PUT TIMEOUT for ${file.name} (120s)`);
+          req.destroy();
+          reject(new Error('R2 upload timeout (120s)'));
+        });
+
+        req.on('drain', writeChunk);
+        req.on('error', (err) => {
+          console.error(`[Upload] R2 PUT error for ${file.name}:`, err.message);
+          reject(err);
+        });
 
       writeChunk();
     });
