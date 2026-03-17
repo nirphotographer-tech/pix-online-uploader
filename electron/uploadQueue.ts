@@ -1,7 +1,8 @@
 import fs from 'fs';
-import https from 'https';
-import http from 'http';
-import { URL } from 'url';
+
+// ============================================================================
+// Types
+// ============================================================================
 
 interface FileEntry {
   id: string;
@@ -11,9 +12,8 @@ interface FileEntry {
   type: string;
   status: 'pending' | 'uploading' | 'processing' | 'done' | 'error';
   loaded: number;
-  peakLoaded: number; // highest loaded value - never goes down
+  peakLoaded: number;
   error?: string;
-  abortController?: AbortController;
   lastModified?: number;
   processResult?: ProcessResult;
 }
@@ -63,8 +63,92 @@ interface ProcessResult {
   needsResponsiveProcessing?: boolean;
 }
 
+// ============================================================================
+// Constants
+// ============================================================================
+
 const MAX_RETRIES = 5;
-const RETRY_DELAYS = [2000, 4000, 8000, 15000]; // ms — exponential backoff
+const RETRY_DELAYS = [2000, 4000, 8000, 15000, 30000];
+const PRESIGN_TIMEOUT = 30_000;
+const R2_PUT_TIMEOUT = 180_000;  // 3 minutes for large files
+const PROCESS_TIMEOUT = 120_000; // 2 minutes for Sharp processing
+
+// ============================================================================
+// Simple HTTP helpers using fetch (Node 22 / Electron 41)
+// ============================================================================
+
+async function httpPost<T>(url: string, body: object, token: string, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    const text = await res.text();
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${text.substring(0, 200)}`);
+    }
+
+    return JSON.parse(text) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function httpPut(url: string, body: Buffer, contentType: string, timeoutMs: number): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const res = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': contentType,
+        'Content-Length': String(body.length),
+      },
+      body: body,
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`R2 PUT ${res.status}: ${text.substring(0, 200)}`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function httpPatch(url: string, body: object, supabaseKey: string): Promise<void> {
+  try {
+    await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': supabaseKey,
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch {
+    // Non-fatal
+  }
+}
+
+// ============================================================================
+// Upload Queue
+// ============================================================================
 
 export class UploadQueue {
   private files: FileEntry[] = [];
@@ -77,9 +161,7 @@ export class UploadQueue {
   private lastCheckTime = 0;
   private currentSpeed = 0;
   private lastEmitTime = 0;
-  private presignCache = new Map<string, PresignResponse>();
-  private presignInFlight = new Set<string>();
-  // Limit concurrent /api/r2/process calls to avoid overwhelming the server
+  // Limit concurrent /api/r2/process calls
   private activeProcessCalls = 0;
   private readonly maxProcessConcurrency = 2;
   private processWaiters: Array<() => void> = [];
@@ -89,19 +171,13 @@ export class UploadQueue {
     console.log(`[Upload] Queue created: galleryId=${options.galleryId}, folderId=${options.folderId || 'NONE'}, concurrency=${options.concurrency}`);
   }
 
-  addFiles(
-    files: Array<{ path: string; name: string; size: number; type: string }>
-  ): void {
+  addFiles(files: Array<{ path: string; name: string; size: number; type: string }>): void {
     for (const file of files) {
-      console.log(`[Upload] addFiles: name=${file.name}, path=${file.path}, size=${file.size}`);
-      // Get file lastModified time from disk
+      console.log(`[Upload] addFiles: name=${file.name}, size=${file.size}`);
       let lastModified: number | undefined;
       try {
-        const stat = fs.statSync(file.path);
-        lastModified = stat.mtimeMs;
-      } catch {
-        // ignore
-      }
+        lastModified = fs.statSync(file.path).mtimeMs;
+      } catch { /* ignore */ }
 
       this.files.push({
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
@@ -125,9 +201,7 @@ export class UploadQueue {
     this.processNext();
   }
 
-  pause(): void {
-    this.isPaused = true;
-  }
+  pause(): void { this.isPaused = true; }
 
   resume(): void {
     this.isPaused = false;
@@ -137,15 +211,16 @@ export class UploadQueue {
   cancel(): void {
     this.isCancelled = true;
     for (const file of this.files) {
-      if (file.status === 'uploading' && file.abortController) {
-        file.abortController.abort();
-      }
       if (file.status === 'pending' || file.status === 'uploading') {
         file.status = 'error';
         file.error = 'ההעלאה בוטלה';
       }
     }
   }
+
+  // ============================================================================
+  // Core loop — picks next pending file and runs the pipeline
+  // ============================================================================
 
   private processNext(): void {
     if (this.isCancelled || this.isPaused) return;
@@ -156,117 +231,148 @@ export class UploadQueue {
 
       nextFile.status = 'uploading';
       this.activeUploads++;
-      this.uploadFile(nextFile).catch(() => {
-        // Error handled in uploadFile
-      });
-    }
 
-    // Pre-fetch presigned URLs for upcoming files (look ahead)
-    this.prefetchPresignUrls();
-  }
-
-  private prefetchPresignUrls(): void {
-    const pending = this.files.filter((f) => f.status === 'pending');
-    // Prefetch for the next batch of files (up to concurrency count)
-    const toPrefetch = pending
-      .filter((f) => !this.presignCache.has(f.id) && !this.presignInFlight.has(f.id))
-      .slice(0, this.options.concurrency);
-
-    for (const file of toPrefetch) {
-      this.presignInFlight.add(file.id);
-      this.presignFile(file)
-        .then((presign) => {
-          this.presignCache.set(file.id, presign);
-          this.presignInFlight.delete(file.id);
-        })
-        .catch(() => {
-          this.presignInFlight.delete(file.id);
-          // Will be retried when the file actually starts uploading
+      this.uploadFile(nextFile)
+        .catch(() => { /* handled inside */ })
+        .finally(() => {
+          this.activeUploads--;
+          this.checkCompletion();
+          this.processNext();
         });
     }
   }
+
+  // ============================================================================
+  // Per-file pipeline: presign → R2 PUT → process → folder assign
+  // ============================================================================
 
   private async uploadFile(file: FileEntry): Promise<void> {
     let lastError: Error | null = null;
     let presign: PresignResponse | null = null;
     let uploadedToR2 = false;
 
-    try {
-      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          if (attempt > 1) {
-            console.log(`[Upload] Retry ${attempt}/${MAX_RETRIES} for ${file.name}`);
-            await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 2]));
-          }
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      if (this.isCancelled) break;
 
-          // Step 1: Get presigned URL (skip if already have one from successful upload)
-          if (!presign || !uploadedToR2) {
-            file.loaded = 0;
-            console.log(`[Upload] === Starting upload: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB) ===`);
-            if (this.presignCache.has(file.id)) {
-              presign = this.presignCache.get(file.id)!;
-              this.presignCache.delete(file.id);
-            } else {
-              presign = await this.presignFile(file);
-            }
-
-            // Step 2: Upload to R2
-            file.abortController = new AbortController();
-            await this.uploadToR2(file, presign.uploadUrl);
-            uploadedToR2 = true;
-          } else {
-            console.log(`[Upload] Retry ${attempt}: skipping R2 upload (already uploaded), retrying process for ${file.name}`);
-          }
-
-          // Step 3: Process uploaded file (limited concurrency to avoid server overload)
-          file.status = 'processing';
-          this.emitProgress(file);
-          await this.acquireProcessSlot();
-          let processResult;
-          try {
-            processResult = await this.processFile(file, presign);
-          } finally {
-            this.releaseProcessSlot();
-          }
-          file.processResult = processResult;
-
-          // Step 4: Assign to correct folder via Supabase if folderId specified
-          if (this.options.folderId && processResult.id && processResult.id !== 'unknown') {
-            await this.updatePhotoFolder(processResult.id, this.options.folderId);
-          }
-
-          file.status = 'done';
-          this.emitProgress(file);
-          console.log(`[Upload] === DONE: ${file.name} ===`);
-          this.options.onFileComplete(file.id, true);
-          return; // success
-        } catch (err) {
-          lastError = err instanceof Error ? err : new Error('שגיאה לא ידועה');
-          if (this.isCancelled) break;
-          if (attempt < MAX_RETRIES) {
-            console.warn(`[Upload] Attempt ${attempt} failed for ${file.name}: ${lastError.message}`);
-          }
+      try {
+        if (attempt > 1) {
+          const delay = RETRY_DELAYS[attempt - 2] || 30000;
+          console.log(`[Upload] ⏳ Retry ${attempt}/${MAX_RETRIES} for ${file.name} (waiting ${delay}ms)`);
+          await this.sleep(delay);
         }
-      }
 
-      // All retries exhausted
-      if (!this.isCancelled) {
-        file.status = 'error';
-        file.error = lastError?.message || 'שגיאה לא ידועה';
-        console.error(`[Upload] === FAILED after ${MAX_RETRIES} attempts: ${file.name} — ${file.error} ===`);
-        this.options.onFileComplete(file.id, false, file.error);
+        // ---- Step 1: Presign (skip if R2 upload already succeeded) ----
+        if (!uploadedToR2) {
+          file.loaded = 0;
+          console.log(`[Upload] [${attempt}/${MAX_RETRIES}] Presigning: ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`);
+
+          const presignResult = await httpPost<{ success: boolean; data: PresignResponse; error?: string }>(
+            `${this.options.apiBaseUrl}/api/r2/presign`,
+            {
+              fileName: file.name,
+              contentType: file.type,
+              fileSize: file.size,
+              galleryId: this.options.galleryId,
+              ...(file.lastModified && { captureTime: new Date(file.lastModified).toISOString() }),
+            },
+            this.options.token,
+            PRESIGN_TIMEOUT,
+          );
+
+          if (!presignResult.success || !presignResult.data?.uploadUrl) {
+            throw new Error(`Presign failed: ${presignResult.error || 'no uploadUrl'}`);
+          }
+          presign = presignResult.data;
+          console.log(`[Upload] [${attempt}] Presign OK: key=${presign.key}`);
+
+          // ---- Step 2: Upload file to R2 ----
+          console.log(`[Upload] [${attempt}] Uploading to R2: ${file.name}`);
+          const fileBuffer = fs.readFileSync(file.path);
+          await httpPut(presign.uploadUrl, fileBuffer, file.type, R2_PUT_TIMEOUT);
+
+          file.loaded = file.size;
+          file.peakLoaded = file.size;
+          this.emitProgress(file);
+          uploadedToR2 = true;
+          console.log(`[Upload] [${attempt}] R2 upload OK: ${file.name}`);
+        } else {
+          console.log(`[Upload] [${attempt}] Skipping R2 upload (already uploaded): ${file.name}`);
+        }
+
+        // ---- Step 3: Process (server-side Sharp) ----
+        file.status = 'processing';
+        this.emitProgress(file);
+
+        await this.acquireProcessSlot();
+        try {
+          console.log(`[Upload] [${attempt}] Processing: ${file.name}`);
+          const processResult = await httpPost<{ success: boolean; data?: { id?: string; storageKey?: string; needsResponsiveProcessing?: boolean }; error?: string }>(
+            `${this.options.apiBaseUrl}/api/r2/process`,
+            {
+              key: presign!.key,
+              baseKey: presign!.baseKey,
+              galleryId: this.options.galleryId,
+              fileName: file.name,
+              fileSize: file.size,
+              fastMode: true,
+              ...(file.lastModified && { captureTime: new Date(file.lastModified).toISOString() }),
+            },
+            this.options.token,
+            PROCESS_TIMEOUT,
+          );
+
+          if (!processResult.success) {
+            throw new Error(`Process failed: ${processResult.error || 'unknown'}`);
+          }
+
+          file.processResult = {
+            id: processResult.data?.id || 'unknown',
+            storageKey: processResult.data?.storageKey || presign!.key,
+            needsResponsiveProcessing: processResult.data?.needsResponsiveProcessing ?? true,
+          };
+          console.log(`[Upload] [${attempt}] Process OK: ${file.name} → id=${file.processResult.id}`);
+        } finally {
+          this.releaseProcessSlot();
+        }
+
+        // ---- Step 4: Assign to folder ----
+        if (this.options.folderId && file.processResult.id && file.processResult.id !== 'unknown') {
+          await httpPatch(
+            `${this.options.supabaseUrl}/rest/v1/gallery_photos?id=eq.${file.processResult.id}`,
+            { folder_id: this.options.folderId },
+            this.options.supabaseKey,
+          );
+        }
+
+        // ---- SUCCESS ----
+        file.status = 'done';
+        this.emitProgress(file);
+        console.log(`[Upload] ✅ DONE: ${file.name}`);
+        this.options.onFileComplete(file.id, true);
+        return;
+
+      } catch (err: unknown) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        // Mark as uploading again for retry
+        file.status = 'uploading';
+        
+        const isAbort = lastError.name === 'AbortError' || lastError.message.includes('abort');
+        const label = isAbort ? 'TIMEOUT' : 'ERROR';
+        console.error(`[Upload] ❌ [${attempt}/${MAX_RETRIES}] ${label} for ${file.name}: ${lastError.message}`);
       }
-    } finally {
-      this.activeUploads--;
-      this.checkCompletion();
-      this.processNext();
     }
+
+    // All retries exhausted
+    file.status = 'error';
+    file.error = lastError?.message || 'שגיאה לא ידועה';
+    console.error(`[Upload] 💀 FAILED after ${MAX_RETRIES} attempts: ${file.name} — ${file.error}`);
+    this.options.onFileComplete(file.id, false, file.error);
   }
 
-  /**
-   * Limits concurrent calls to the process API to avoid server overload.
-   * Upload to R2 can be highly concurrent, but processing is heavy server-side.
-   */
+  // ============================================================================
+  // Process concurrency limiter
+  // ============================================================================
+
   private acquireProcessSlot(): Promise<void> {
     if (this.activeProcessCalls < this.maxProcessConcurrency) {
       this.activeProcessCalls++;
@@ -283,328 +389,27 @@ export class UploadQueue {
   private releaseProcessSlot(): void {
     this.activeProcessCalls--;
     const next = this.processWaiters.shift();
-    // Small stagger delay between process calls to avoid overwhelming the server
-    if (next) setTimeout(next, 500);
+    if (next) setTimeout(next, 300);
   }
 
-  private presignFile(file: FileEntry): Promise<PresignResponse> {
-    return new Promise((resolve, reject) => {
-      const captureTime = file.lastModified
-        ? new Date(file.lastModified).toISOString()
-        : undefined;
-
-      const body = JSON.stringify({
-        fileName: file.name,
-        contentType: file.type,
-        fileSize: file.size,
-        galleryId: this.options.galleryId,
-        ...(captureTime && { captureTime }),
-      });
-
-      const url = new URL(`${this.options.apiBaseUrl}/api/r2/presign`);
-      const isHttps = url.protocol === 'https:';
-      const httpModule = isHttps ? https : http;
-
-      console.log(`[Upload] Presigning ${file.name} for gallery ${this.options.galleryId}`);
-
-      const req = httpModule.request(
-        {
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          path: url.pathname,
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-            Authorization: `Bearer ${this.options.token}`,
-          },
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              try {
-                const parsed = JSON.parse(data);
-                // API returns { success: true, data: { uploadUrl, key, baseKey, ... } }
-                const presignData = parsed.data || parsed;
-                if (!presignData.uploadUrl || !presignData.key) {
-                  console.error('[Upload] Presign response missing fields:', JSON.stringify(parsed));
-                  reject(new Error('תגובה חסרה מהשרת - אין קישור העלאה'));
-                  return;
-                }
-                console.log(`[Upload] Presign OK: key=${presignData.key}`);
-                resolve(presignData as PresignResponse);
-              } catch {
-                console.error('[Upload] Presign parse error, raw:', data);
-                reject(new Error('תגובה לא תקינה מהשרת'));
-              }
-            } else {
-              console.error(`[Upload] Presign failed: ${res.statusCode}`, data);
-              reject(new Error(`שגיאה בקבלת קישור העלאה: ${res.statusCode} - ${data}`));
-            }
-          });
-        }
-      );
-
-
-        // 30 second timeout for presign API
-        req.setTimeout(30000, () => {
-          console.error(`[Upload] Presign TIMEOUT for ${file.name} (30s)`);
-          req.destroy();
-          reject(new Error('Presign API timeout (30s)'));
-        });
-
-      req.on('error', (err) => {
-        console.error('[Upload] Presign network error:', err.message);
-        reject(err);
-      });
-      req.write(body);
-      req.end();
-    });
-  }
-
-  private uploadToR2(file: FileEntry, uploadUrl: string): Promise<void> {
-    return new Promise((resolve, reject) => {
-      console.log(`[Upload] uploadToR2: file.path=${file.path}, uploadUrl=${uploadUrl?.substring(0, 80)}...`);
-      const fileBuffer = fs.readFileSync(file.path);
-      const url = new URL(uploadUrl);
-      const isHttps = url.protocol === 'https:';
-      const httpModule = isHttps ? https : http;
-
-      const req = httpModule.request(
-        {
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          path: url.pathname + url.search,
-          method: 'PUT',
-          headers: {
-            'Content-Type': file.type,
-            'Content-Length': fileBuffer.length,
-          },
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              console.log(`[Upload] PUT to R2 OK for ${file.name} (status ${res.statusCode})`);
-              file.loaded = file.size;
-              this.emitProgress(file);
-              resolve();
-            } else {
-              console.error(`[Upload] PUT to R2 FAILED for ${file.name}: ${res.statusCode}`, data);
-              reject(new Error(`שגיאה בהעלאת קובץ: ${res.statusCode} - ${data}`));
-            }
-          });
-        }
-      );
-
-      // Track upload progress using drain events
-      let bytesWritten = 0;
-      const chunkSize = 256 * 1024; // 256KB chunks for faster throughput
-      let offset = 0;
-
-      const writeChunk = (): void => {
-        if (this.isCancelled || file.abortController?.signal.aborted) {
-          req.destroy();
-          reject(new Error('ההעלאה בוטלה'));
-          return;
-        }
-
-        let canWrite = true;
-        while (canWrite && offset < fileBuffer.length) {
-          const end = Math.min(offset + chunkSize, fileBuffer.length);
-          const chunk = fileBuffer.subarray(offset, end);
-          canWrite = req.write(chunk);
-          bytesWritten += chunk.length;
-          offset = end;
-
-          file.loaded = bytesWritten;
-          this.emitProgress(file);
-        }
-
-        if (offset >= fileBuffer.length) {
-          req.end();
-        }
-      };
-
-
-        // 120 second timeout for R2 PUT upload (large files can take time)
-        req.setTimeout(120000, () => {
-          console.error(`[Upload] R2 PUT TIMEOUT for ${file.name} (120s)`);
-          req.destroy();
-          reject(new Error('R2 upload timeout (120s)'));
-        });
-
-        req.on('drain', writeChunk);
-        req.on('error', (err) => {
-          console.error(`[Upload] R2 PUT error for ${file.name}:`, err.message);
-          reject(err);
-        });
-
-      writeChunk();
-    });
-  }
-
-  private processFile(
-    file: FileEntry,
-    presign: PresignResponse
-  ): Promise<ProcessResult> {
-    return new Promise((resolve, reject) => {
-      const captureTime = file.lastModified
-        ? new Date(file.lastModified).toISOString()
-        : undefined;
-
-      const body = JSON.stringify({
-        key: presign.key,
-        baseKey: presign.baseKey,
-        galleryId: this.options.galleryId,
-        fileName: file.name,
-        fileSize: file.size,
-        fastMode: true,
-        ...(captureTime && { captureTime }),
-      });
-
-      const url = new URL(`${this.options.apiBaseUrl}/api/r2/process`);
-      const isHttps = url.protocol === 'https:';
-      const httpModule = isHttps ? https : http;
-
-      console.log(`[Upload] Processing ${file.name} (key: ${presign.key}, folderId: ${this.options.folderId || 'NONE'})`);
-
-      const req = httpModule.request(
-        {
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          path: url.pathname,
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-            Authorization: `Bearer ${this.options.token}`,
-          },
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              try {
-                const parsed = JSON.parse(data);
-                if (parsed.success === false) {
-                  console.error(`[Upload] Process API returned success:false for ${file.name}:`, parsed.error);
-                  reject(new Error(`שגיאה בעיבוד: ${parsed.error || 'unknown'}`));
-                  return;
-                }
-                console.log(`[Upload] Process response for ${file.name}:`, JSON.stringify(parsed.data || parsed).substring(0, 300));
-                const result: ProcessResult = {
-                  id: parsed.data?.id || 'unknown',
-                  storageKey: parsed.data?.storageKey || presign.key,
-                  needsResponsiveProcessing: parsed.data?.needsResponsiveProcessing ?? true,
-                };
-                console.log(`[Upload] Process OK for ${file.name}: photo id=${result.id}`);
-                resolve(result);
-              } catch {
-                // If response isn't JSON but status is 2xx, still OK
-                console.log(`[Upload] Process OK for ${file.name} (non-JSON response)`);
-                resolve({ id: 'unknown', storageKey: presign.key, needsResponsiveProcessing: true });
-              }
-            } else {
-              console.error(`[Upload] Process FAILED for ${file.name}: ${res.statusCode}`, data);
-              reject(new Error(`שגיאה בעיבוד הקובץ: ${res.statusCode} - ${data}`));
-            }
-          });
-        }
-      );
-
-      // 90 second timeout for process API (server-side Sharp processing can be slow)
-      req.setTimeout(90000, () => {
-        console.error(`[Upload] Process TIMEOUT for ${file.name} (90s)`);
-        req.destroy();
-        reject(new Error('Process API timeout (90s)'));
-      });
-
-      req.on('error', (err) => {
-        console.error('[Upload] Process network error:', err.message);
-        reject(err);
-      });
-      req.write(body);
-      req.end();
-    });
-  }
-
-  /**
-   * Update photo's folder_id directly via Supabase REST API
-   * Called after process step succeeds to assign photo to the correct folder
-   */
-  private updatePhotoFolder(photoId: string, folderId: string): Promise<void> {
-    return new Promise((resolve) => {
-      const body = JSON.stringify({ folder_id: folderId });
-
-      // PATCH gallery_photos where id = photoId
-      const url = new URL(
-        `${this.options.supabaseUrl}/rest/v1/gallery_photos?id=eq.${photoId}`
-      );
-      const isHttps = url.protocol === 'https:';
-      const httpModule = isHttps ? https : http;
-
-      console.log(`[Upload] Updating folder for photo ${photoId} → ${folderId}`);
-
-      const req = httpModule.request(
-        {
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          path: url.pathname + url.search,
-          method: 'PATCH',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-            apikey: this.options.supabaseKey,
-            Authorization: `Bearer ${this.options.supabaseKey}`,
-            Prefer: 'return=minimal',
-          },
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              console.log(`[Upload] ✅ Folder updated for photo ${photoId}`);
-              resolve();
-            } else {
-              console.warn(`[Upload] ⚠️ Folder update failed for photo ${photoId}: ${res.statusCode}`, data);
-              // Non-fatal: photo uploaded OK, just folder assignment failed
-              resolve();
-            }
-          });
-        }
-      );
-
-      req.on('error', (err) => {
-        console.warn(`[Upload] ⚠️ Folder update error for ${photoId}:`, err.message);
-        resolve(); // non-fatal
-      });
-      req.write(body);
-      req.end();
-    });
-  }
+  // ============================================================================
+  // Progress reporting
+  // ============================================================================
 
   private emitProgress(currentFile: FileEntry): void {
     const now = Date.now();
 
-    // Update peakLoaded - never goes down
     currentFile.peakLoaded = Math.max(currentFile.peakLoaded, currentFile.loaded);
 
-    // Throttle progress emissions to max 5 per second (unless file just completed)
-    const isFileComplete = currentFile.status === 'done' || currentFile.status === 'processing';
-    if (!isFileComplete && now - this.lastEmitTime < 200) return;
+    // Throttle to max 5/sec (unless file completed)
+    const isComplete = currentFile.status === 'done' || currentFile.status === 'processing';
+    if (!isComplete && now - this.lastEmitTime < 200) return;
     this.lastEmitTime = now;
 
-    // For total progress: use peakLoaded so retries don't cause progress to go backwards
     const totalLoaded = this.files.reduce((sum, f) => sum + f.peakLoaded, 0);
     const totalSize = this.files.reduce((sum, f) => sum + f.size, 0);
 
-    // Calculate speed every 500ms
+    // Speed calculation
     if (now - this.lastCheckTime > 500) {
       const timeDelta = (now - this.lastCheckTime) / 1000;
       const bytesDelta = totalLoaded - this.totalBytesAtLastCheck;
@@ -614,143 +419,94 @@ export class UploadQueue {
     }
 
     const remaining = totalSize - totalLoaded;
-    const eta =
-      this.currentSpeed > 0 ? Math.round(remaining / this.currentSpeed) : 0;
+    const eta = this.currentSpeed > 0 ? Math.round(remaining / this.currentSpeed) : 0;
 
-    // Weighted progress: upload bytes = 80% of progress, processing = 20%
-    // This prevents the progress bar from jumping to 100% before processing is done
+    // Weighted progress: 80% upload + 20% processing
     const UPLOAD_WEIGHT = 0.8;
     let weightedProgress = 0;
-
     for (const f of this.files) {
       const uploadShare = f.size > 0 ? (f.peakLoaded / f.size) : 0;
       let fileProgress: number;
-      if (f.status === 'done') {
-        fileProgress = 1.0; // fully done
-      } else if (f.status === 'processing') {
-        fileProgress = UPLOAD_WEIGHT; // upload done, processing in progress
-      } else {
-        fileProgress = uploadShare * UPLOAD_WEIGHT; // uploading
-      }
+      if (f.status === 'done') fileProgress = 1.0;
+      else if (f.status === 'processing') fileProgress = UPLOAD_WEIGHT;
+      else fileProgress = uploadShare * UPLOAD_WEIGHT;
       weightedProgress += fileProgress * f.size;
     }
 
-    const weightedPercentage = totalSize > 0
-      ? Math.round((weightedProgress / totalSize) * 100)
-      : 0;
+    const weightedPercentage = totalSize > 0 ? Math.round((weightedProgress / totalSize) * 100) : 0;
 
     this.options.onProgress({
       fileId: currentFile.id,
       fileName: currentFile.name,
       loaded: currentFile.loaded,
       total: currentFile.size,
-      percentage: currentFile.size > 0
-        ? Math.round((currentFile.loaded / currentFile.size) * 100)
-        : 0,
+      percentage: currentFile.size > 0 ? Math.round((currentFile.loaded / currentFile.size) * 100) : 0,
       speed: this.currentSpeed,
       totalLoaded,
       totalSize,
-      totalPercentage: Math.min(weightedPercentage, 99), // never show 100% until truly done
+      totalPercentage: Math.min(weightedPercentage, 99),
       eta,
     });
   }
 
+  // ============================================================================
+  // Completion check + background responsive processing
+  // ============================================================================
+
   private checkCompletion(): void {
-    const allDone = this.files.every(
-      (f) => f.status === 'done' || f.status === 'error'
-    );
-    if (allDone && this.files.length > 0) {
-      const totalTime = Math.round((Date.now() - this.startTime) / 1000);
-      const success = this.files.filter((f) => f.status === 'done').length;
-      const failed = this.files.filter((f) => f.status === 'error').length;
+    const allDone = this.files.every((f) => f.status === 'done' || f.status === 'error');
+    if (!allDone || this.files.length === 0) return;
 
-      // 🚀 Trigger background processing for responsive versions (non-blocking)
-      this.triggerBackgroundProcessing();
+    const totalTime = Math.round((Date.now() - this.startTime) / 1000);
+    const success = this.files.filter((f) => f.status === 'done').length;
+    const failed = this.files.filter((f) => f.status === 'error').length;
 
-      this.options.onAllComplete({
-        total: this.files.length,
-        success,
-        failed,
-        totalTime,
-      });
-    }
+    console.log(`[Upload] 📊 Complete: ${success} success, ${failed} failed, ${totalTime}s`);
+
+    // Background responsive processing (fire and forget)
+    this.triggerBackgroundProcessing();
+
+    this.options.onAllComplete({ total: this.files.length, success, failed, totalTime });
   }
 
-  /**
-   * Background processing: PUT /api/r2/process for responsive image versions
-   * Runs after all uploads complete, 2 at a time, non-blocking
-   */
   private triggerBackgroundProcessing(): void {
-    const photosToProcess = this.files
+    const photos = this.files
       .filter((f) => f.status === 'done' && f.processResult?.needsResponsiveProcessing)
       .map((f) => f.processResult!);
 
-    if (photosToProcess.length === 0) {
-      console.log('[Upload] No photos need background processing');
-      return;
-    }
+    if (photos.length === 0) return;
 
-    console.log(`[Upload] 🔄 Starting background processing for ${photosToProcess.length} photos...`);
-    const CONCURRENT = 2;
+    console.log(`[Upload] 🔄 Background processing for ${photos.length} photos...`);
 
-    const processQueue = async () => {
-      for (let i = 0; i < photosToProcess.length; i += CONCURRENT) {
-        const batch = photosToProcess.slice(i, i + CONCURRENT);
-        await Promise.all(batch.map((photo) => this.backgroundProcess(photo)));
+    const run = async () => {
+      for (const photo of photos) {
+        try {
+          await fetch(`${this.options.apiBaseUrl}/api/r2/process`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${this.options.token}`,
+            },
+            body: JSON.stringify({
+              photoId: photo.id,
+              galleryId: this.options.galleryId,
+              storageKey: photo.storageKey,
+            }),
+            signal: AbortSignal.timeout(120_000),
+          });
+          console.log(`[Upload] ✅ Background OK: ${photo.id}`);
+        } catch (err) {
+          console.warn(`[Upload] ⚠️ Background failed: ${photo.id}`, err);
+        }
+        // Small delay between calls
+        await this.sleep(1000);
       }
-      console.log(`[Upload] ✅ Background processing complete for all ${photosToProcess.length} photos`);
     };
 
-    // Fire and forget
-    processQueue().catch((err) => {
-      console.error('[Upload] Background processing error:', err);
-    });
+    run().catch(() => {});
   }
 
-  private backgroundProcess(photo: ProcessResult): Promise<void> {
-    return new Promise((resolve) => {
-      const body = JSON.stringify({
-        photoId: photo.id,
-        galleryId: this.options.galleryId,
-        storageKey: photo.storageKey,
-      });
-
-      const url = new URL(`${this.options.apiBaseUrl}/api/r2/process`);
-      const isHttps = url.protocol === 'https:';
-      const httpModule = isHttps ? https : http;
-
-      const req = httpModule.request(
-        {
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          path: url.pathname,
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(body),
-            Authorization: `Bearer ${this.options.token}`,
-          },
-        },
-        (res) => {
-          let data = '';
-          res.on('data', (chunk: Buffer) => (data += chunk.toString()));
-          res.on('end', () => {
-            if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-              console.log(`[Upload] ✅ Background process OK for photo ${photo.id}`);
-            } else {
-              console.warn(`[Upload] ⚠️ Background process failed for photo ${photo.id}: ${res.statusCode}`);
-            }
-            resolve(); // always resolve — background processing is optional
-          });
-        }
-      );
-
-      req.on('error', (err) => {
-        console.warn(`[Upload] ⚠️ Background process error for ${photo.id}:`, err.message);
-        resolve(); // non-fatal
-      });
-      req.write(body);
-      req.end();
-    });
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
   }
 }
