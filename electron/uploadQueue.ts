@@ -63,8 +63,8 @@ interface ProcessResult {
   needsResponsiveProcessing?: boolean;
 }
 
-const MAX_RETRIES = 3;
-const RETRY_DELAYS = [1000, 3000, 5000]; // ms
+const MAX_RETRIES = 5;
+const RETRY_DELAYS = [2000, 4000, 8000, 15000]; // ms — exponential backoff
 
 export class UploadQueue {
   private files: FileEntry[] = [];
@@ -81,7 +81,7 @@ export class UploadQueue {
   private presignInFlight = new Set<string>();
   // Limit concurrent /api/r2/process calls to avoid overwhelming the server
   private activeProcessCalls = 0;
-  private readonly maxProcessConcurrency = 4;
+  private readonly maxProcessConcurrency = 3;
   private processWaiters: Array<() => void> = [];
 
   constructor(options: QueueOptions) {
@@ -188,6 +188,8 @@ export class UploadQueue {
 
   private async uploadFile(file: FileEntry): Promise<void> {
     let lastError: Error | null = null;
+    let presign: PresignResponse | null = null;
+    let uploadedToR2 = false;
 
     try {
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -195,27 +197,30 @@ export class UploadQueue {
           if (attempt > 1) {
             console.log(`[Upload] Retry ${attempt}/${MAX_RETRIES} for ${file.name}`);
             await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 2]));
+          }
+
+          // Step 1: Get presigned URL (skip if already have one from successful upload)
+          if (!presign || !uploadedToR2) {
             file.loaded = 0;
-          }
-          console.log(`[Upload] === Starting upload: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB) ===`);
+            console.log(`[Upload] === Starting upload: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB) ===`);
+            if (this.presignCache.has(file.id)) {
+              presign = this.presignCache.get(file.id)!;
+              this.presignCache.delete(file.id);
+            } else {
+              presign = await this.presignFile(file);
+            }
 
-          // Step 1: Get presigned URL (use cached if pre-fetched)
-          let presign: PresignResponse;
-          if (this.presignCache.has(file.id)) {
-            presign = this.presignCache.get(file.id)!;
-            this.presignCache.delete(file.id);
-            console.log(`[Upload] Using pre-fetched presign for ${file.name}`);
+            // Step 2: Upload to R2
+            file.abortController = new AbortController();
+            await this.uploadToR2(file, presign.uploadUrl);
+            uploadedToR2 = true;
           } else {
-            presign = await this.presignFile(file);
+            console.log(`[Upload] Retry ${attempt}: skipping R2 upload (already uploaded), retrying process for ${file.name}`);
           }
-
-          // Step 2: Upload to R2
-          file.abortController = new AbortController();
-          await this.uploadToR2(file, presign.uploadUrl);
 
           // Step 3: Process uploaded file (limited concurrency to avoid server overload)
           file.status = 'processing';
-          this.emitProgress(file); // broadcast processing state
+          this.emitProgress(file);
           await this.acquireProcessSlot();
           let processResult;
           try {
@@ -231,13 +236,13 @@ export class UploadQueue {
           }
 
           file.status = 'done';
-          this.emitProgress(file); // broadcast done state — weighted progress now 100% for this file
+          this.emitProgress(file);
           console.log(`[Upload] === DONE: ${file.name} ===`);
           this.options.onFileComplete(file.id, true);
-          return; // success — exit retry loop
+          return; // success
         } catch (err) {
           lastError = err instanceof Error ? err : new Error('שגיאה לא ידועה');
-          if (this.isCancelled) break; // don't retry if cancelled
+          if (this.isCancelled) break;
           if (attempt < MAX_RETRIES) {
             console.warn(`[Upload] Attempt ${attempt} failed for ${file.name}: ${lastError.message}`);
           }
@@ -491,13 +496,6 @@ export class UploadQueue {
           });
         }
       );
-
-      // 90 second timeout for process API (server-side Sharp processing can be slow)
-      req.setTimeout(90000, () => {
-        console.error(`[Upload] Process TIMEOUT for ${file.name} (90s)`);
-        req.destroy();
-        reject(new Error('Process API timeout (90s)'));
-      });
 
       // 90 second timeout for process API (server-side Sharp processing can be slow)
       req.setTimeout(90000, () => {
