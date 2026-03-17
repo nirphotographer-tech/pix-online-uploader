@@ -76,6 +76,9 @@ export class UploadQueue {
   private totalBytesAtLastCheck = 0;
   private lastCheckTime = 0;
   private currentSpeed = 0;
+  private lastEmitTime = 0;
+  private presignCache = new Map<string, PresignResponse>();
+  private presignInFlight = new Set<string>();
 
   constructor(options: QueueOptions) {
     this.options = options;
@@ -153,6 +156,30 @@ export class UploadQueue {
         // Error handled in uploadFile
       });
     }
+
+    // Pre-fetch presigned URLs for upcoming files (look ahead)
+    this.prefetchPresignUrls();
+  }
+
+  private prefetchPresignUrls(): void {
+    const pending = this.files.filter((f) => f.status === 'pending');
+    // Prefetch for the next batch of files (up to concurrency count)
+    const toPrefetch = pending
+      .filter((f) => !this.presignCache.has(f.id) && !this.presignInFlight.has(f.id))
+      .slice(0, this.options.concurrency);
+
+    for (const file of toPrefetch) {
+      this.presignInFlight.add(file.id);
+      this.presignFile(file)
+        .then((presign) => {
+          this.presignCache.set(file.id, presign);
+          this.presignInFlight.delete(file.id);
+        })
+        .catch(() => {
+          this.presignInFlight.delete(file.id);
+          // Will be retried when the file actually starts uploading
+        });
+    }
   }
 
   private async uploadFile(file: FileEntry): Promise<void> {
@@ -168,8 +195,15 @@ export class UploadQueue {
           }
           console.log(`[Upload] === Starting upload: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB) ===`);
 
-          // Step 1: Get presigned URL
-          const presign = await this.presignFile(file);
+          // Step 1: Get presigned URL (use cached if pre-fetched)
+          let presign: PresignResponse;
+          if (this.presignCache.has(file.id)) {
+            presign = this.presignCache.get(file.id)!;
+            this.presignCache.delete(file.id);
+            console.log(`[Upload] Using pre-fetched presign for ${file.name}`);
+          } else {
+            presign = await this.presignFile(file);
+          }
 
           // Step 2: Upload to R2
           file.abortController = new AbortController();
@@ -321,7 +355,7 @@ export class UploadQueue {
 
       // Track upload progress using drain events
       let bytesWritten = 0;
-      const chunkSize = 64 * 1024; // 64KB chunks
+      const chunkSize = 256 * 1024; // 256KB chunks for faster throughput
       let offset = 0;
 
       const writeChunk = (): void => {
@@ -495,6 +529,11 @@ export class UploadQueue {
 
     // Update peakLoaded - never goes down
     currentFile.peakLoaded = Math.max(currentFile.peakLoaded, currentFile.loaded);
+
+    // Throttle progress emissions to max 5 per second (unless file just completed)
+    const isFileComplete = currentFile.status === 'done' || currentFile.status === 'processing';
+    if (!isFileComplete && now - this.lastEmitTime < 200) return;
+    this.lastEmitTime = now;
 
     // For total progress: use peakLoaded so retries don't cause progress to go backwards
     const totalLoaded = this.files.reduce((sum, f) => sum + f.peakLoaded, 0);
