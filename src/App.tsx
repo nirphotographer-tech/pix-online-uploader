@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import LoginScreen from './screens/LoginScreen';
 import GallerySelectScreen from './screens/GallerySelectScreen';
 import FolderSelectScreen from './screens/FolderSelectScreen';
@@ -6,6 +6,8 @@ import UploadScreen from './screens/UploadScreen';
 import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
+
+const APP_VERSION = '1.1.0';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -34,6 +36,7 @@ export default function App() {
   const [galleryKey, setGalleryKey] = useState(0);
   const [folderKey, setFolderKey] = useState(0);
   const [uploadSessions, setUploadSessions] = useState<UploadSessionInfo[]>([]);
+  const pendingDeepLinkRef = useRef<any>(null);
 
   // Restore session on mount
   useEffect(() => {
@@ -119,27 +122,44 @@ export default function App() {
     };
   }, []);
 
-  // Deep link handler
+  // Deep link handler — also queues pending link if auth isn't ready yet
   useEffect(() => {
     if (!window.electronAPI) return;
 
     const unsubscribe = window.electronAPI.deepLink.onDeepLink((payload) => {
-      if (payload.action === 'upload' && payload.galleryId && auth) {
-        setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });
-
-        // If deep link includes a folderId, skip folder selection and go straight to upload
-        if (payload.folderId) {
-          setFolder({ id: payload.folderId, name: payload.folderName || 'תיקייה' });
-          setScreen('upload');
+      if (payload.action === 'upload' && payload.galleryId) {
+        if (auth) {
+          applyDeepLink(payload);
         } else {
-          setFolder(null);
-          setScreen('folders');
+          // Auth not ready yet (session restoring) — save for later
+          pendingDeepLinkRef.current = payload;
         }
       }
     });
 
     return unsubscribe;
   }, [auth]);
+
+  // Process pending deep link once auth becomes available
+  useEffect(() => {
+    if (auth && pendingDeepLinkRef.current) {
+      const payload = pendingDeepLinkRef.current;
+      pendingDeepLinkRef.current = null;
+      applyDeepLink(payload);
+    }
+  }, [auth]);
+
+  const applyDeepLink = useCallback((payload: any) => {
+    setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });
+
+    if (payload.folderId) {
+      setFolder({ id: payload.folderId, name: payload.folderName || 'תיקייה' });
+      setScreen('upload');
+    } else {
+      setFolder(null);
+      setScreen('folders');
+    }
+  }, []);
 
   const handleLogin = useCallback((token: string, userId: string, email: string) => {
     setAuth({ token, userId, email });
@@ -253,6 +273,11 @@ export default function App() {
           onDismiss={handleDismissSession}
         />
       )}
+
+      {/* Version number */}
+      <div className="fixed bottom-2 left-2 text-[10px] text-white/20 select-none pointer-events-none">
+        v{APP_VERSION}
+      </div>
     </div>
   );
 }

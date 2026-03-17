@@ -28,6 +28,8 @@ export interface DeepLinkPayload {
   action: string;
   galleryId: string;
   galleryName: string;
+  folderId: string;
+  folderName: string;
 }
 
 export interface ElectronAPI {

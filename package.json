@@ -1,6 +1,6 @@
 {
   "name": "pix-online-uploader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Desktop uploader for Pix Online photographers",
   "main": "dist-electron/main.js",
   "author": "Pix Online",
@@ -33,13 +33,14 @@
       }
     ],
     "mac": {
-      "target": "dmg",
-      "icon": "build/icon.icns",
+      "target": [
+        "dmg",
+        "dir"
+      ],
       "category": "public.app-category.photography"
     },
     "win": {
-      "target": "nsis",
-      "icon": "build/icon.ico"
+      "target": "nsis"
     },
     "nsis": {
       "oneClick": false,
@@ -49,6 +50,7 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.2",
+    "electron-store": "^8.2.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
@@ -62,7 +64,6 @@
     "concurrently": "^9.2.1",
     "electron": "^41.0.2",
     "electron-builder": "^26.8.1",
-    "electron-store": "^8.2.0",
     "postcss": "^8.5.8",
     "tailwindcss": "^4.2.1",
     "typescript": "^5.9.3",

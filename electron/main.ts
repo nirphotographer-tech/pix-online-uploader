@@ -136,15 +136,20 @@ app.on('open-url', (_event, url) => {
 function handleDeepLink(url: string): void {
   try {
     const parsed = new URL(url);
-    const action = parsed.searchParams.get('action');
+    // pix-uploader://upload?galleryId=... → hostname is "upload"
+    const action = parsed.hostname || parsed.searchParams.get('action');
     const galleryId = parsed.searchParams.get('galleryId');
     const galleryName = parsed.searchParams.get('galleryName');
+    const folderId = parsed.searchParams.get('folderId');
+    const folderName = parsed.searchParams.get('folderName');
 
     if (action === 'upload' && galleryId && mainWindow) {
       mainWindow.webContents.send('deep-link', {
         action,
         galleryId,
         galleryName: galleryName || '',
+        folderId: folderId || '',
+        folderName: folderName || '',
       });
     }
   } catch {
