@@ -146,7 +146,7 @@ export class UploadQueue {
   private lastEmitTime = 0;
   // Limit concurrent /api/r2/process calls
   private activeProcessCalls = 0;
-  private readonly maxProcessConcurrency = 1;
+  private readonly maxProcessConcurrency = 2;
   private processWaiters: Array<() => void> = [];
 
   constructor(options: QueueOptions) {
@@ -216,7 +216,7 @@ export class UploadQueue {
       this.activeUploads++;
 
       // Small stagger between starting concurrent files to avoid thundering herd on API
-      const stagger = (this.activeUploads - 1) * 500;
+      const stagger = (this.activeUploads - 1) * 200;
 
       const start = async () => {
         if (stagger > 0) await this.sleep(stagger);
@@ -415,7 +415,7 @@ export class UploadQueue {
   private releaseProcessSlot(): void {
     this.activeProcessCalls--;
     const next = this.processWaiters.shift();
-    if (next) setTimeout(next, 1500); // 1.5s gap between process calls to avoid overwhelming Vercel
+    if (next) setTimeout(next, 500); // 1.5s gap between process calls to avoid overwhelming Vercel
   }
 
   // ============================================================================
