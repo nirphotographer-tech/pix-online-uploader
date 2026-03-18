@@ -397,3 +397,49 @@ ipcMain.on('auth:freshToken', (_event, token: string) => {
 });
 
 // Token refresh IPC
+
+// Duplicate check: query existing photos in gallery by file_name + size_bytes
+ipcMain.handle(
+  'gallery:checkDuplicates',
+  async (
+    _event,
+    galleryId: string,
+    folderId: string,
+    fileNames: string[],
+    token: string
+  ): Promise<{ file_name: string; id: string; size_bytes: number | null }[]> => {
+    try {
+      if (fileNames.length === 0) return [];
+
+      // Build filter: gallery_id + file_name in list
+      // Supabase REST API supports `in` operator
+      const namesParam = `(${fileNames.map((n) => `"${n}"`).join(',')})`;
+      let url = `${SUPABASE_URL}/rest/v1/gallery_photos?gallery_id=eq.${galleryId}&file_name=in.${encodeURIComponent(namesParam)}&select=id,file_name,size_bytes`;
+
+      // Add folder filter if not the default "full gallery" folder
+      if (folderId) {
+        url += `&folder_id=eq.${folderId}`;
+      }
+
+      const res = await fetch(url, {
+        headers: {
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${token}`,
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (!res.ok) {
+        console.warn(`[DupCheck] HTTP ${res.status}: ${await res.text()}`);
+        return []; // On error, allow upload (don't block)
+      }
+
+      const rows: { id: string; file_name: string; size_bytes: number | null }[] = await res.json();
+      console.log(`[DupCheck] Found ${rows.length} existing photos matching ${fileNames.length} file names`);
+      return rows;
+    } catch (err) {
+      console.warn('[DupCheck] Error:', err);
+      return []; // On error, allow upload
+    }
+  }
+);

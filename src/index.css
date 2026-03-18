@@ -9,7 +9,20 @@
   --color-dark-hover: #252525;
   --color-brand-primary: #6366f1;
   --color-brand-hover: #818cf8;
+  --animate-slide-down: slide-down 0.3s ease-out;
 }
+
+@keyframes slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 
 * {
   margin: 0;

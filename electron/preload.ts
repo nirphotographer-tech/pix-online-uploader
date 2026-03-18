@@ -87,6 +87,14 @@ export interface ElectronAPI {
     onTokenRefreshRequest: (callback: () => void) => () => void;
     sendFreshToken: (token: string) => void;
   };
+  gallery: {
+    checkDuplicates: (
+      galleryId: string,
+      folderId: string,
+      fileNames: string[],
+      token: string
+    ) => Promise<{ file_name: string; id: string; size_bytes: number | null }[]>;
+  };
 }
 
 const electronAPI: ElectronAPI = {
@@ -160,6 +168,10 @@ const electronAPI: ElectronAPI = {
     sendFreshToken: (token: string) => {
       ipcRenderer.send('auth:freshToken', token);
     },
+  },
+  gallery: {
+    checkDuplicates: (galleryId, folderId, fileNames, token) =>
+      ipcRenderer.invoke('gallery:checkDuplicates', galleryId, folderId, fileNames, token),
   },
 };
 
