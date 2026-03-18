@@ -26,6 +26,7 @@ interface QueueOptions {
   folderId?: string;
   supabaseUrl: string;
   supabaseKey: string;
+  tokenRefresher: () => Promise<string>;
   onProgress: (progress: ProgressPayload) => void;
   onFileComplete: (fileId: string, success: boolean, error?: string) => void;
   onAllComplete: (stats: StatsPayload) => void;
@@ -149,9 +150,43 @@ export class UploadQueue {
   private readonly maxProcessConcurrency = 2;
   private processWaiters: Array<() => void> = [];
 
+  // Current token — starts with the one from options but can be refreshed
+  private currentToken: string;
+  private tokenRefreshPromise: Promise<string> | null = null;
+
   constructor(options: QueueOptions) {
     this.options = options;
+    this.currentToken = options.token;
     console.log(`[Upload] Queue created: galleryId=${options.galleryId}, folderId=${options.folderId || 'NONE'}, concurrency=${options.concurrency}`);
+  }
+
+  /**
+   * Refresh the auth token when we get a 401.
+   * Multiple concurrent calls will share the same refresh promise.
+   */
+  private async refreshToken(): Promise<string> {
+    if (this.tokenRefreshPromise) {
+      return this.tokenRefreshPromise;
+    }
+    this.tokenRefreshPromise = (async () => {
+      try {
+        console.log('[Upload] 🔑 Requesting fresh token...');
+        const freshToken = await this.options.tokenRefresher();
+        if (freshToken) {
+          this.currentToken = freshToken;
+          console.log('[Upload] 🔑 Token refreshed successfully');
+          return freshToken;
+        }
+        console.warn('[Upload] 🔑 Token refresh returned empty');
+        return this.currentToken;
+      } catch (err) {
+        console.error('[Upload] 🔑 Token refresh failed:', err);
+        return this.currentToken;
+      } finally {
+        this.tokenRefreshPromise = null;
+      }
+    })();
+    return this.tokenRefreshPromise;
   }
 
   addFiles(files: Array<{ path: string; name: string; size: number; type: string }>): void {
@@ -266,7 +301,7 @@ export class UploadQueue {
               galleryId: this.options.galleryId,
               ...(file.lastModified && { captureTime: new Date(file.lastModified).toISOString() }),
             },
-            this.options.token,
+            this.currentToken,
             PRESIGN_TIMEOUT,
           );
 
@@ -309,7 +344,7 @@ export class UploadQueue {
               ...(this.options.folderId && { folderId: this.options.folderId }),
               ...(file.lastModified && { captureTime: new Date(file.lastModified).toISOString() }),
             },
-            this.options.token,
+            this.currentToken,
             PROCESS_TIMEOUT,
           );
 
@@ -347,6 +382,14 @@ export class UploadQueue {
 
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
+        
+        // If we got a 401 Unauthorized, refresh the token before next retry
+        const is401 = lastError.message.includes('HTTP 401') || lastError.message.includes('Unauthorized');
+        if (is401 && attempt < MAX_RETRIES) {
+          console.log(`[Upload] 🔑 Got 401 for ${file.name}, refreshing token...`);
+          await this.refreshToken();
+        }
+        
         // Mark as uploading again for retry
         file.status = 'uploading';
         
@@ -374,7 +417,7 @@ export class UploadQueue {
       const res = await fetch(url, {
         headers: {
           'apikey': this.options.supabaseKey,
-          'Authorization': `Bearer ${this.options.token}`,
+          'Authorization': `Bearer ${this.currentToken}`,
         },
         signal: AbortSignal.timeout(10_000),
       });
@@ -519,7 +562,7 @@ export class UploadQueue {
             method: 'PUT',
             headers: {
               'Content-Type': 'application/json',
-              'Authorization': `Bearer ${this.options.token}`,
+              'Authorization': `Bearer ${this.currentToken}`,
             },
             body: JSON.stringify({
               photoId: photo.id,

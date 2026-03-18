@@ -82,6 +82,26 @@ let powerSaveId: number | null = null;
 let uploadManager: UploadManager | null = null;
 let pendingDeepLinkUrl: string | null = null;
 
+// Token refresh: renderer sends fresh tokens here when requested
+let tokenRefreshResolve: ((token: string) => void) | null = null;
+
+function requestFreshToken(): Promise<string> {
+  return new Promise((resolve) => {
+    tokenRefreshResolve = resolve;
+    // Ask the renderer to refresh the token via Supabase
+    mainWindow?.webContents.send('auth:refreshTokenRequest');
+    // Timeout after 10s
+    setTimeout(() => {
+      if (tokenRefreshResolve === resolve) {
+        tokenRefreshResolve = null;
+        resolve(''); // empty = refresh failed
+      }
+    }, 10000);
+  });
+}
+
+// Token refresh: renderer sends fresh tokens here when requested
+
 const isDev = process.argv.includes('--dev');
 const API_BASE_URL = process.env.VITE_API_BASE_URL || 'https://www.pix-online.com';
 const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://hxiwmsglhwvlcclwzzod.supabase.co';
@@ -275,6 +295,7 @@ function getUploadManager(): UploadManager {
       supabaseUrl: SUPABASE_URL,
       supabaseKey: SUPABASE_ANON_KEY,
       concurrency: 3,
+      tokenRefresher: requestFreshToken,
       onSessionUpdate: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionUpdate', session);
       },
@@ -366,3 +387,13 @@ ipcMain.handle('upload:hasActiveSessions', () => {
 ipcMain.handle('config:getApiBaseUrl', () => {
   return API_BASE_URL;
 });
+
+// Token refresh IPC
+ipcMain.on('auth:freshToken', (_event, token: string) => {
+  if (tokenRefreshResolve) {
+    tokenRefreshResolve(token);
+    tokenRefreshResolve = null;
+  }
+});
+
+// Token refresh IPC

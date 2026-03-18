@@ -33,6 +33,7 @@ interface UploadManagerOptions {
   supabaseUrl: string;
   supabaseKey: string;
   concurrency: number;
+  tokenRefresher: () => Promise<string>;
   onSessionUpdate: (session: UploadSessionInfo) => void;
   onSessionComplete: (session: UploadSessionInfo) => void;
   onAllSessionsComplete: () => void;
@@ -89,6 +90,7 @@ export class UploadManager {
       folderId,
       supabaseUrl: this.options.supabaseUrl,
       supabaseKey: this.options.supabaseKey,
+      tokenRefresher: this.options.tokenRefresher,
       onProgress: (progress: ProgressPayload) => {
         info.totalLoaded = progress.totalLoaded;
         info.percentage = progress.totalPercentage;

@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '2.0.0';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -218,6 +218,80 @@ export default function App() {
       applyDeepLink(payload);
     }
   }, [auth]);
+
+
+  // Proactive token refresh — refresh every 50 minutes to avoid JWT expiry (1h)
+  useEffect(() => {
+    if (!auth) return;
+
+    const REFRESH_INTERVAL = 50 * 60 * 1000; // 50 minutes
+
+    const refreshToken = async () => {
+      try {
+        const { data, error } = await supabase.auth.refreshSession();
+        if (error || !data.session) {
+          console.error('Token refresh failed:', error?.message);
+          return;
+        }
+        const fresh = data.session;
+        setAuth({
+          token: fresh.access_token,
+          userId: fresh.user.id,
+          email: fresh.user.email || auth.email,
+        });
+        await window.electronAPI.store.setSession({
+          access_token: fresh.access_token,
+          refresh_token: fresh.refresh_token,
+          user_id: fresh.user.id,
+          email: fresh.user.email || auth.email,
+        });
+        console.log('[Auth] Token refreshed proactively');
+      } catch (err) {
+        console.error('[Auth] Token refresh error:', err);
+      }
+    };
+
+    const interval = setInterval(refreshToken, REFRESH_INTERVAL);
+    return () => clearInterval(interval);
+  }, [auth]);
+
+  // Listen for token-refresh requests from the main process (upload queue got 401)
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    
+    const handler = async () => {
+      try {
+        const { data, error } = await supabase.auth.refreshSession();
+        if (error || !data.session) {
+          console.error('[Auth] Reactive token refresh failed:', error?.message);
+          return;
+        }
+        const fresh = data.session;
+        setAuth({
+          token: fresh.access_token,
+          userId: fresh.user.id,
+          email: fresh.user.email || auth?.email || '',
+        });
+        await window.electronAPI.store.setSession({
+          access_token: fresh.access_token,
+          refresh_token: fresh.refresh_token,
+          user_id: fresh.user.id,
+          email: fresh.user.email || auth?.email || '',
+        });
+        // Send the fresh token back to the main process
+        window.electronAPI.auth.sendFreshToken(fresh.access_token);
+        console.log('[Auth] Token refreshed reactively (after 401)');
+      } catch (err) {
+        console.error('[Auth] Reactive token refresh error:', err);
+        window.electronAPI.auth.sendFreshToken(''); // Signal failure
+      }
+    };
+
+    const unsub = window.electronAPI.auth.onTokenRefreshRequest(handler);
+    return unsub;
+  }, [auth]);
+
+
 
   const applyDeepLink = useCallback((payload: any) => {
     setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });

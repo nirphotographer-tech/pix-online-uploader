@@ -83,6 +83,10 @@ export interface ElectronAPI {
   deepLink: {
     onDeepLink: (callback: (payload: DeepLinkPayload) => void) => () => void;
   };
+  auth: {
+    onTokenRefreshRequest: (callback: () => void) => () => void;
+    sendFreshToken: (token: string) => void;
+  };
 }
 
 const electronAPI: ElectronAPI = {
@@ -145,6 +149,16 @@ const electronAPI: ElectronAPI = {
         callback(payload);
       ipcRenderer.on('deep-link', handler);
       return () => ipcRenderer.removeListener('deep-link', handler);
+    },
+  },
+  auth: {
+    onTokenRefreshRequest: (callback) => {
+      const handler = () => callback();
+      ipcRenderer.on('auth:refreshTokenRequest', handler);
+      return () => ipcRenderer.removeListener('auth:refreshTokenRequest', handler);
+    },
+    sendFreshToken: (token: string) => {
+      ipcRenderer.send('auth:freshToken', token);
     },
   },
 };
