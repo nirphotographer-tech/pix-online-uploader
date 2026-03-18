@@ -71,7 +71,7 @@ const MAX_RETRIES = 7;
 const RETRY_DELAYS = [2000, 4000, 8000, 15000, 30000, 45000, 60000];
 const PRESIGN_TIMEOUT = 30_000;
 const R2_PUT_TIMEOUT = 180_000;  // 3 minutes for large files
-const PROCESS_TIMEOUT = 30_000; // instant save is very fast // 3 minutes for Sharp processing (incl Vercel cold start)
+const PROCESS_TIMEOUT = 120_000; // 2 minutes — covers Vercel cold start + DB write
 
 // ============================================================================
 // Simple HTTP helpers using fetch (Node 22 / Electron 41)
@@ -146,7 +146,7 @@ export class UploadQueue {
   private lastEmitTime = 0;
   // Limit concurrent /api/r2/process calls
   private activeProcessCalls = 0;
-  private readonly maxProcessConcurrency = 5;
+  private readonly maxProcessConcurrency = 2;
   private processWaiters: Array<() => void> = [];
 
   constructor(options: QueueOptions) {
@@ -374,7 +374,7 @@ export class UploadQueue {
       const res = await fetch(url, {
         headers: {
           'apikey': this.options.supabaseKey,
-          'Authorization': `Bearer ${this.options.supabaseKey}`,
+          'Authorization': `Bearer ${this.options.token}`,
         },
         signal: AbortSignal.timeout(10_000),
       });
