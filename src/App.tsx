@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.1.0';
+const APP_VERSION = '2.2.0';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -37,6 +37,17 @@ export default function App() {
   const [folderKey, setFolderKey] = useState(0);
   const [uploadSessions, setUploadSessions] = useState<UploadSessionInfo[]>([]);
   const pendingDeepLinkRef = useRef<any>(null);
+  const [screenTransition, setScreenTransition] = useState(false);
+  const [showCelebration, setShowCelebration] = useState(false);
+
+  // Screen transition helper
+  const navigateTo = useCallback((nextScreen: Screen) => {
+    setScreenTransition(true);
+    setTimeout(() => {
+      setScreen(nextScreen);
+      setScreenTransition(false);
+    }, 150);
+  }, []);
 
   // Restore session on mount
   useEffect(() => {
@@ -48,20 +59,17 @@ export default function App() {
         }
         const saved = await window.electronAPI.store.getSession();
         if (saved) {
-          // Refresh the token via Supabase to ensure it's valid
           const { data, error } = await supabase.auth.setSession({
             access_token: saved.access_token,
             refresh_token: saved.refresh_token,
           });
 
           if (error || !data.session) {
-            // Token expired and can't be refreshed — force re-login
             await window.electronAPI.store.clearSession();
             setLoading(false);
             return;
           }
 
-          // Save the refreshed tokens
           const freshToken = data.session.access_token;
           const freshRefresh = data.session.refresh_token;
           await window.electronAPI.store.setSession({
@@ -88,12 +96,10 @@ export default function App() {
     restoreSession();
   }, []);
 
-  // Listen to upload session events (persistent across all screens)
-  // Also broadcast progress to Supabase Realtime so the web app can show it
+  // Listen to upload session events + broadcast to Supabase Realtime
   useEffect(() => {
     if (!window.electronAPI) return;
 
-    // Keep one persistent channel per galleryId for broadcasting
     const channels = new Map<string, ReturnType<typeof supabase.channel>>();
     const channelReady = new Map<string, boolean>();
     const pendingMessages = new Map<string, any>();
@@ -108,7 +114,6 @@ export default function App() {
       channel.subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           channelReady.set(galleryId, true);
-          // Send any pending message
           const pending = pendingMessages.get(galleryId);
           if (pending) {
             channel.send({ type: 'broadcast', event: 'upload-progress', payload: pending });
@@ -128,7 +133,6 @@ export default function App() {
       const isFinal = session.status === 'done' || session.status === 'error';
       const prevCompleted = lastCompletedFiles.get(session.sessionId) || 0;
       const fileJustCompleted = session.completedFiles > prevCompleted;
-      // Allow through if: final state, file just completed, or 1s since last broadcast
       if (!isFinal && !fileJustCompleted && now - last < 1000) return;
       lastBroadcast.set(session.sessionId, now);
       lastCompletedFiles.set(session.sessionId, session.completedFiles);
@@ -151,7 +155,6 @@ export default function App() {
       if (channelReady.get(session.galleryId)) {
         channel.send({ type: 'broadcast', event: 'upload-progress', payload });
       } else {
-        // Channel not ready yet — queue it
         pendingMessages.set(session.galleryId, payload);
       }
     };
@@ -180,19 +183,37 @@ export default function App() {
         return [...prev, session];
       });
       broadcastProgress(session);
+
+      // Celebration + native notification on successful completion
+      if (session.status === 'done' && session.failedFiles === 0) {
+        setShowCelebration(true);
+        setTimeout(() => setShowCelebration(false), 3000);
+
+        // Native OS notification
+        if ('Notification' in window && Notification.permission === 'granted') {
+          new Notification('ההעלאה הושלמה! ��', {
+            body: `${session.completedFiles} תמונות הועלו ל-${session.galleryName}`,
+          });
+        } else if ('Notification' in window && Notification.permission !== 'denied') {
+          Notification.requestPermission().then((perm) => {
+            if (perm === 'granted') {
+              new Notification('ההעלאה הושלמה! 🎉', {
+                body: `${session.completedFiles} תמונות הועלו ל-${session.galleryName}`,
+              });
+            }
+          });
+        }
+      }
     });
 
     return () => {
       unsubUpdate();
       unsubComplete();
-      // Clean up all channels
       channels.forEach((channel) => supabase.removeChannel(channel));
     };
   }, []);
 
-
-
-  // Deep link handler — also queues pending link if auth isn't ready yet
+  // Deep link handler
   useEffect(() => {
     if (!window.electronAPI) return;
 
@@ -201,7 +222,6 @@ export default function App() {
         if (auth) {
           applyDeepLink(payload);
         } else {
-          // Auth not ready yet (session restoring) — save for later
           pendingDeepLinkRef.current = payload;
         }
       }
@@ -219,12 +239,11 @@ export default function App() {
     }
   }, [auth]);
 
-
-  // Proactive token refresh — refresh every 50 minutes to avoid JWT expiry (1h)
+  // Proactive token refresh — every 50 minutes
   useEffect(() => {
     if (!auth) return;
 
-    const REFRESH_INTERVAL = 50 * 60 * 1000; // 50 minutes
+    const REFRESH_INTERVAL = 50 * 60 * 1000;
 
     const refreshToken = async () => {
       try {
@@ -255,7 +274,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [auth]);
 
-  // Listen for token-refresh requests from the main process (upload queue got 401)
+  // Reactive token refresh (after 401 from upload queue)
   useEffect(() => {
     if (!window.electronAPI) return;
     
@@ -278,20 +297,17 @@ export default function App() {
           user_id: fresh.user.id,
           email: fresh.user.email || auth?.email || '',
         });
-        // Send the fresh token back to the main process
         window.electronAPI.auth.sendFreshToken(fresh.access_token);
         console.log('[Auth] Token refreshed reactively (after 401)');
       } catch (err) {
         console.error('[Auth] Reactive token refresh error:', err);
-        window.electronAPI.auth.sendFreshToken(''); // Signal failure
+        window.electronAPI.auth.sendFreshToken('');
       }
     };
 
     const unsub = window.electronAPI.auth.onTokenRefreshRequest(handler);
     return unsub;
   }, [auth]);
-
-
 
   const applyDeepLink = useCallback((payload: any) => {
     setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });
@@ -307,47 +323,46 @@ export default function App() {
 
   const handleLogin = useCallback((token: string, userId: string, email: string) => {
     setAuth({ token, userId, email });
-    setScreen('galleries');
-  }, []);
+    navigateTo('galleries');
+  }, [navigateTo]);
 
   const handleSelectGallery = useCallback((galleryId: string, galleryName: string) => {
     setGallery({ id: galleryId, name: galleryName });
     setFolder(null);
-    setScreen('folders');
-  }, []);
+    navigateTo('folders');
+  }, [navigateTo]);
 
   const handleSelectFolder = useCallback((folderId: string, folderName: string) => {
     setFolder({ id: folderId, name: folderName });
-    setScreen('upload');
-  }, []);
+    navigateTo('upload');
+  }, [navigateTo]);
 
   const handleBackToFolders = useCallback(() => {
     setFolder(null);
     setFolderKey((k) => k + 1);
-    setScreen('folders');
-  }, []);
+    navigateTo('folders');
+  }, [navigateTo]);
 
   const handleUploadStarted = useCallback(() => {
-    // After upload starts, navigate back to folders so user can upload more
     setFolder(null);
     setFolderKey((k) => k + 1);
-    setScreen('folders');
-  }, []);
+    navigateTo('folders');
+  }, [navigateTo]);
 
   const handleLogout = useCallback(async () => {
     await window.electronAPI.store.clearSession();
     setAuth(null);
     setGallery(null);
     setFolder(null);
-    setScreen('login');
-  }, []);
+    navigateTo('login');
+  }, [navigateTo]);
 
   const handleBackToGalleries = useCallback(() => {
     setGallery(null);
     setFolder(null);
     setGalleryKey((k) => k + 1);
-    setScreen('galleries');
-  }, []);
+    navigateTo('galleries');
+  }, [navigateTo]);
 
   const handleCancelSession = useCallback((sessionId: string) => {
     window.electronAPI.upload.cancelSession(sessionId);
@@ -361,19 +376,49 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-dark-bg">
-        <svg className="animate-spin w-8 h-8 text-brand-primary" viewBox="0 0 24 24" fill="none">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-        </svg>
+      <div className="flex flex-col items-center justify-center h-screen bg-dark-bg gap-3">
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-brand-primary to-brand-hover flex items-center justify-center shadow-lg shadow-brand-primary/20">
+          <svg className="animate-spin w-5 h-5 text-white" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        </div>
+        <p className="text-xs text-gray-600">טוען...</p>
       </div>
     );
   }
 
   return (
     <div className="flex flex-col h-screen">
-      {/* Main content area */}
-      <div className="flex-1 overflow-hidden">
+      {/* Celebration overlay */}
+      {showCelebration && (
+        <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center">
+          <div className="animate-celebration">
+            <div className="text-6xl">🎉</div>
+          </div>
+          {/* Confetti-like dots */}
+          {Array.from({ length: 12 }).map((_, i) => (
+            <div
+              key={i}
+              className="absolute w-2 h-2 rounded-full animate-celebration"
+              style={{
+                background: ['#6366f1', '#818cf8', '#34d399', '#fbbf24', '#f87171'][i % 5],
+                top: `${20 + Math.random() * 60}%`,
+                left: `${10 + Math.random() * 80}%`,
+                animationDelay: `${i * 80}ms`,
+                animationDuration: `${600 + Math.random() * 400}ms`,
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Main content area with transition */}
+      <div
+        className={`flex-1 overflow-hidden transition-opacity duration-150 ${
+          screenTransition ? 'opacity-0' : 'opacity-100'
+        }`}
+      >
         {screen === 'login' && <LoginScreen onLogin={handleLogin} />}
         {screen === 'galleries' && auth && (
           <GallerySelectScreen
@@ -409,7 +454,7 @@ export default function App() {
         )}
       </div>
 
-      {/* Persistent upload status bar — visible on all screens when uploads are active */}
+      {/* Persistent upload status bar */}
       {screen !== 'login' && uploadSessions.length > 0 && (
         <UploadStatusBar
           sessions={uploadSessions}
@@ -419,7 +464,7 @@ export default function App() {
       )}
 
       {/* Version number */}
-      <div className="fixed bottom-2 left-2 text-[10px] text-white/20 select-none pointer-events-none">
+      <div className="fixed bottom-2 left-2 text-[10px] text-white/15 select-none pointer-events-none">
         v{APP_VERSION}
       </div>
     </div>

@@ -434,7 +434,7 @@ ipcMain.handle(
         return []; // On error, allow upload (don't block)
       }
 
-      const rows: { id: string; file_name: string; size_bytes: number | null }[] = await res.json();
+      const rows = (await res.json()) as { id: string; file_name: string; size_bytes: number | null }[];
       console.log(`[DupCheck] Found ${rows.length} existing photos matching ${fileNames.length} file names`);
       return rows;
     } catch (err) {
