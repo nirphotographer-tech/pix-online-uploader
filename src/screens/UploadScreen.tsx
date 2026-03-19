@@ -263,17 +263,17 @@ export default function UploadScreen({
   return (
     <div className="flex flex-col h-screen bg-dark-bg">
       {/* Header */}
-      <div className="flex items-center gap-3 px-6 py-4 border-b border-dark-border pt-8">
+      <div className="flex items-center gap-3 px-6 py-4 border-b border-dark-border">
         <button
           onClick={onBack}
-          className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-400 hover:text-white hover:border-brand-primary/50 transition-all"
+          className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-400 hover:text-gray-900 hover:border-brand-primary/50 transition-all"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
           </svg>
         </button>
         <div className="flex-1 min-w-0">
-          <h1 className="text-lg font-bold text-white truncate">{galleryName}</h1>
+          <h1 className="text-lg font-bold text-gray-900 truncate">{galleryName}</h1>
           {folderName && folderName !== 'כל הגלריה' && (
             <div className="flex items-center gap-1.5 mt-0.5">
               <span className="inline-flex items-center gap-1 text-xs text-brand-primary/70 bg-brand-primary/10 px-2 py-0.5 rounded-md">
@@ -340,7 +340,7 @@ export default function UploadScreen({
                   </svg>
                 </div>
                 <div>
-                  <h2 className="text-white text-base font-bold" dir="rtl">נמצאו קבצים כפולים</h2>
+                  <h2 className="text-gray-900 text-base font-bold" dir="rtl">נמצאו קבצים כפולים</h2>
                   <p className="text-gray-500 text-xs" dir="rtl">
                     {duplicateInfo.duplicates.length === 1
                       ? 'קובץ אחד כבר קיים בגלריה'
@@ -399,8 +399,7 @@ export default function UploadScreen({
               {/* Upload all anyway */}
               <button
                 onClick={handleUploadAll}
-                className="w-full py-2.5 bg-brand-primary hover:bg-brand-hover text-white text-sm rounded-xl
-                           transition-all duration-200 font-medium hover:shadow-lg hover:shadow-brand-primary/20"
+                className="w-full py-2.5 bg-brand-primary hover:bg-brand-hover text-white text-sm rounded-md transition-all duration-200 font-semibold hover:shadow-lg hover:shadow-brand-primary/20"
               >
                 העלו הכל בכל זאת ({allPendingFiles.length})
               </button>
@@ -409,8 +408,7 @@ export default function UploadScreen({
               {duplicateInfo.newFiles.length > 0 && (
                 <button
                   onClick={handleSkipDuplicates}
-                  className="w-full py-2.5 bg-dark-bg border border-dark-border text-gray-300 text-sm rounded-xl
-                             hover:bg-dark-hover hover:border-brand-primary/30 hover:text-white transition-all duration-200"
+                  className="w-full py-2.5 bg-dark-bg border border-gray-600 text-gray-300 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/30 hover:text-gray-100 transition-all duration-200"
                 >
                   דלגו על כפולים, העלו רק חדשים ({duplicateInfo.newFiles.length})
                 </button>
@@ -521,24 +519,19 @@ export default function UploadScreen({
                 </>
               ) : (
                 <>
-                  <p className="text-gray-300 text-base font-medium mb-1">גררו תמונות לכאן</p>
-                  <p className="text-gray-600 text-xs mb-6">ההעלאה תתחיל אוטומטית ברגע שתשחררו</p>
+                  <p className="text-gray-100 text-base font-semibold mb-1">גררו תמונות לכאן</p>
+                  <p className="text-gray-500 text-xs mb-6">ההעלאה תתחיל אוטומטית ברגע שתשחררו</p>
 
                   <div className="flex items-center gap-3 justify-center mb-6">
                     <button
                       onClick={handleAddFiles}
-                      className="px-5 py-2.5 bg-brand-primary hover:bg-brand-hover text-white text-sm
-                                 rounded-xl transition-all duration-200 font-medium
-                                 hover:shadow-lg hover:shadow-brand-primary/20 hover:-translate-y-0.5
-                                 active:translate-y-0"
+                      className="px-6 py-2.5 bg-brand-primary hover:bg-brand-hover text-white text-sm rounded-md transition-all duration-200 font-semibold hover:shadow-lg hover:shadow-brand-primary/20 hover:-translate-y-0.5 active:translate-y-0"
                     >
                       ✨ בחרו קבצים
                     </button>
                     <button
                       onClick={handleAddFolder}
-                      className="px-5 py-2.5 bg-dark-card border border-dark-border text-gray-300 text-sm
-                                 rounded-xl hover:bg-dark-hover hover:border-brand-primary/30 hover:text-white
-                                 transition-all duration-200"
+                      className="px-6 py-2.5 bg-dark-card border border-gray-600 text-gray-200 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/50 hover:text-white transition-all duration-200 font-medium"
                     >
                       📁 בחרו תיקייה
                     </button>

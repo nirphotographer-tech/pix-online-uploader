@@ -141,10 +141,10 @@ export default function GallerySelectScreen({
   return (
     <div className="flex flex-col h-screen bg-dark-bg">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-dark-border pt-8">
+      <div className="px-6 py-4 border-b border-dark-border">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-lg font-bold text-white">הגלריות שלי</h1>
+            <h1 className="text-lg font-bold text-gray-900">הגלריות שלי</h1>
             <p className="text-[11px] text-gray-600 mt-0.5">{email}</p>
           </div>
           <div className="flex items-center gap-2">
@@ -152,7 +152,7 @@ export default function GallerySelectScreen({
               onClick={() => fetchGalleries(true)}
               disabled={refreshing}
               className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center
-                         text-gray-500 hover:text-white hover:border-brand-primary/30 transition-all disabled:opacity-50"
+                         text-gray-500 hover:text-gray-900 hover:border-brand-primary/30 transition-all disabled:opacity-50"
               title="רענון"
             >
               <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -162,7 +162,7 @@ export default function GallerySelectScreen({
             <button
               onClick={onLogout}
               className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center
-                         text-gray-500 hover:text-red-400 hover:border-red-500/30 transition-all"
+                         text-gray-500 hover:text-red-500 hover:border-red-400/50 transition-all"
               title="התנתקות"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -175,7 +175,7 @@ export default function GallerySelectScreen({
         {/* Search bar */}
         {!loading && galleries.length > 0 && (
           <div className="relative">
-            <svg className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-600 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
             </svg>
             <input
@@ -183,13 +183,13 @@ export default function GallerySelectScreen({
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="חפשו גלריה..."
-              className="w-full pr-9 pl-4 py-2.5 bg-dark-card border border-dark-border rounded-xl text-white text-sm
+              className="w-full pr-4 pl-9 py-2.5 bg-dark-card border border-dark-border rounded-xl text-gray-900 text-sm
                          placeholder-gray-600 focus:outline-none focus:border-brand-primary/40 transition-all"
             />
             {search && (
               <button
                 onClick={() => setSearch('')}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400 transition-colors"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-600 hover:text-gray-400 transition-colors"
               >
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -263,12 +263,12 @@ export default function GallerySelectScreen({
                 style={{ animationDelay: `${index * 40}ms` }}
               >
                 {/* Cover */}
-                <div className="w-full aspect-video rounded-lg bg-dark-bg mb-2.5 overflow-hidden relative">
+                <div className="w-full rounded-lg bg-dark-bg mb-2.5 overflow-hidden relative">
                   {(gallery.cover_photo_url || gallery.cover_image) ? (
                     <img
                       src={(gallery.cover_photo_url || gallery.cover_image)!}
                       alt={gallery.name}
-                      className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                      className="w-full object-contain max-h-36 transition-transform duration-500 group-hover:scale-105"
                       onError={(e) => {
                         (e.target as HTMLImageElement).style.display = 'none';
                       }}
@@ -287,7 +287,7 @@ export default function GallerySelectScreen({
 
                 {/* Info */}
                 <div className="flex items-center gap-2 mb-0.5">
-                  <h3 className="text-sm font-medium text-white group-hover:text-brand-hover transition-colors truncate flex-1">
+                  <h3 className="text-sm font-medium text-gray-900 group-hover:text-brand-hover transition-colors truncate flex-1">
                     {gallery.name}
                   </h3>
                   {gallery.is_published === false && (
