@@ -1,4 +1,5 @@
 import fs from 'fs';
+import sizeOf from 'image-size';
 
 // ============================================================================
 // Types
@@ -276,6 +277,7 @@ export class UploadQueue {
     let lastError: Error | null = null;
     let presign: PresignResponse | null = null;
     let uploadedToR2 = false;
+    let cachedFileBuffer: Buffer | null = null;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (this.isCancelled) break;
@@ -313,8 +315,8 @@ export class UploadQueue {
 
           // ---- Step 2: Upload file to R2 ----
           console.log(`[Upload] [${attempt}] Uploading to R2: ${file.name}`);
-          const fileBuffer = fs.readFileSync(file.path);
-          await httpPut(presign.uploadUrl, fileBuffer, file.type, R2_PUT_TIMEOUT);
+          cachedFileBuffer = fs.readFileSync(file.path);
+          await httpPut(presign.uploadUrl, cachedFileBuffer, file.type, R2_PUT_TIMEOUT);
 
           file.loaded = file.size;
           file.peakLoaded = file.size;
@@ -329,6 +331,18 @@ export class UploadQueue {
         file.status = 'processing';
         this.emitProgress(file);
 
+        // Read image dimensions from buffer (already in memory from R2 upload)
+        let imageWidth = 0;
+        let imageHeight = 0;
+        try {
+          const dims = sizeOf(cachedFileBuffer || fs.readFileSync(file.path));
+          imageWidth = dims.width || 0;
+          imageHeight = dims.height || 0;
+          console.log(`[Upload] [${attempt}] Dimensions: ${imageWidth}x${imageHeight}`);
+        } catch (dimErr) {
+          console.warn(`[Upload] [${attempt}] Could not read dimensions:`, dimErr);
+        }
+
         await this.acquireProcessSlot();
         try {
           console.log(`[Upload] [${attempt}] Processing: ${file.name}`);
@@ -341,6 +355,7 @@ export class UploadQueue {
               fileName: file.name,
               fileSize: file.size,
               instantSave: true,
+              ...(imageWidth && imageHeight && { imageWidth, imageHeight }),
               ...(this.options.folderId && { folderId: this.options.folderId }),
               ...(file.lastModified && { captureTime: new Date(file.lastModified).toISOString() }),
             },

@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.2.0';
+const APP_VERSION = '2.3.3';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -38,7 +38,12 @@ export default function App() {
   const [uploadSessions, setUploadSessions] = useState<UploadSessionInfo[]>([]);
   const pendingDeepLinkRef = useRef<any>(null);
   const [screenTransition, setScreenTransition] = useState(false);
-  const [showCelebration, setShowCelebration] = useState(false);
+  const [toastNotifications, setToastNotifications] = useState<Array<{
+    id: string;
+    folderName: string;
+    galleryName: string;
+    count: number;
+  }>>([]);
 
   // Screen transition helper
   const navigateTo = useCallback((nextScreen: Screen) => {
@@ -184,25 +189,18 @@ export default function App() {
       });
       broadcastProgress(session);
 
-      // Celebration + native notification on successful completion
+      // Toast notification on successful completion
       if (session.status === 'done' && session.failedFiles === 0) {
-        setShowCelebration(true);
-        setTimeout(() => setShowCelebration(false), 3000);
-
-        // Native OS notification
-        if ('Notification' in window && Notification.permission === 'granted') {
-          new Notification('ההעלאה הושלמה! ��', {
-            body: `${session.completedFiles} תמונות הועלו ל-${session.galleryName}`,
-          });
-        } else if ('Notification' in window && Notification.permission !== 'denied') {
-          Notification.requestPermission().then((perm) => {
-            if (perm === 'granted') {
-              new Notification('ההעלאה הושלמה! 🎉', {
-                body: `${session.completedFiles} תמונות הועלו ל-${session.galleryName}`,
-              });
-            }
-          });
-        }
+        const toastId = session.sessionId;
+        setToastNotifications((prev) => [
+          ...prev.filter((t) => t.id !== toastId),
+          {
+            id: toastId,
+            folderName: session.folderName || 'תיקייה',
+            galleryName: session.galleryName || 'גלריה',
+            count: session.completedFiles,
+          },
+        ]);
       }
     });
 
@@ -354,6 +352,7 @@ export default function App() {
     setAuth(null);
     setGallery(null);
     setFolder(null);
+    setToastNotifications([]);
     navigateTo('login');
   }, [navigateTo]);
 
@@ -390,25 +389,32 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen">
-      {/* Celebration overlay */}
-      {showCelebration && (
-        <div className="fixed inset-0 z-50 pointer-events-none flex items-center justify-center">
-          <div className="animate-celebration">
-            <div className="text-6xl">🎉</div>
-          </div>
-          {/* Confetti-like dots */}
-          {Array.from({ length: 12 }).map((_, i) => (
+      {/* macOS traffic light drag region */}
+      <div className="h-9 flex-shrink-0" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
+      {/* Toast notifications */}
+      {toastNotifications.length > 0 && (
+        <div className="fixed top-14 right-3 z-50 flex flex-col gap-2 pointer-events-none">
+          {toastNotifications.map((toast) => (
             <div
-              key={i}
-              className="absolute w-2 h-2 rounded-full animate-celebration"
-              style={{
-                background: ['#6366f1', '#818cf8', '#34d399', '#fbbf24', '#f87171'][i % 5],
-                top: `${20 + Math.random() * 60}%`,
-                left: `${10 + Math.random() * 80}%`,
-                animationDelay: `${i * 80}ms`,
-                animationDuration: `${600 + Math.random() * 400}ms`,
-              }}
-            />
+              key={toast.id}
+              className="pointer-events-auto flex items-start gap-3 bg-white border border-gray-200 rounded-xl shadow-lg px-4 py-3 min-w-[240px] max-w-[300px] animate-slide-in"
+            >
+              <span className="text-xl mt-0.5">✅</span>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-gray-900 leading-tight">העלאה הושלמה!</p>
+                <p className="text-xs text-gray-500 mt-0.5 leading-snug">
+                  {toast.count} תמונות הועלו לתיקייה <span className="font-medium text-gray-700">{toast.folderName}</span>
+                </p>
+              </div>
+              <button
+                onClick={() => setToastNotifications((prev) => prev.filter((t) => t.id !== toast.id))}
+                className="text-gray-400 hover:text-gray-600 transition-colors mt-0.5 flex-shrink-0"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M18 6L6 18M6 6l12 12"/>
+                </svg>
+              </button>
+            </div>
           ))}
         </div>
       )}
@@ -464,7 +470,7 @@ export default function App() {
       )}
 
       {/* Version number */}
-      <div className="fixed bottom-2 left-2 text-[10px] text-white/15 select-none pointer-events-none">
+      <div className="fixed bottom-2 left-2 text-[10px] text-black/30 select-none pointer-events-none">
         v{APP_VERSION}
       </div>
     </div>

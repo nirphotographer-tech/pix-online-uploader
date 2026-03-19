@@ -73,28 +73,24 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
     <div className="flex items-center justify-center h-screen bg-dark-bg relative overflow-hidden">
       {/* Background decorative elements */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-[-20%] right-[-10%] w-[500px] h-[500px] bg-brand-primary/[0.03] rounded-full blur-3xl" />
-        <div className="absolute bottom-[-20%] left-[-10%] w-[400px] h-[400px] bg-brand-hover/[0.03] rounded-full blur-3xl" />
+        <div className="absolute top-[-20%] right-[-10%] w-[500px] h-[500px] bg-brand-primary/[0.06] rounded-full blur-3xl" />
+        <div className="absolute bottom-[-20%] left-[-10%] w-[400px] h-[400px] bg-brand-hover/[0.06] rounded-full blur-3xl" />
       </div>
 
       <div className="w-full max-w-sm px-8 relative z-10 animate-slide-up">
         {/* Logo / Title */}
         <div className="text-center mb-10">
-          <div className="relative w-18 h-18 mx-auto mb-5">
-            <div className="w-18 h-18 rounded-2xl bg-gradient-to-br from-brand-primary to-brand-hover flex items-center justify-center shadow-lg shadow-brand-primary/20">
-              <svg className="w-9 h-9 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                  d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            </div>
-            {/* Decorative dot */}
-            <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-brand-primary/30 animate-float" />
+          <div className="relative w-20 h-20 mx-auto mb-5">
+            <img
+              src="/icon.png"
+              alt="Pix Online"
+              className="w-20 h-20 rounded-2xl object-contain"
+              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            />
           </div>
-          <h1 className="text-2xl font-bold text-white">Pix Online</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Pix Online</h1>
           <p className="text-gray-500 text-sm mt-1.5">כלי העלאה מהיר לצלמים</p>
-        </div>
-
-        {/* Error */}
+        </div>        {/* Error */}
         {error && (
           <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-400 text-sm text-center animate-slide-down">
             {error}
@@ -110,8 +106,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               value={identifier}
               onChange={(e) => setIdentifier(e.target.value)}
               placeholder="your@email.com"
-              className="w-full px-4 py-3 bg-dark-card border border-dark-border rounded-xl text-white
-                         placeholder-gray-600 focus:outline-none focus:border-brand-primary/50 focus:ring-1 focus:ring-brand-primary/20
+              className="w-full px-4 py-3 bg-dark-card border border-dark-border rounded-xl text-gray-900
+                         placeholder-gray-400 focus:outline-none focus:border-brand-primary/50 focus:ring-1 focus:ring-brand-primary/20
                          transition-all text-sm"
               required
               autoFocus
@@ -127,8 +123,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
-                className="w-full px-4 py-3 pl-10 bg-dark-card border border-dark-border rounded-xl text-white
-                           placeholder-gray-600 focus:outline-none focus:border-brand-primary/50 focus:ring-1 focus:ring-brand-primary/20
+                className="w-full px-4 py-3 pl-10 bg-dark-card border border-dark-border rounded-xl text-gray-900
+                           placeholder-gray-400 focus:outline-none focus:border-brand-primary/50 focus:ring-1 focus:ring-brand-primary/20
                            transition-all text-sm"
                 required
                 dir="ltr"
@@ -179,7 +175,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         </form>
 
         {/* Bottom subtle branding */}
-        <p className="text-center text-gray-700 text-[10px] mt-8">Pix Online Uploader</p>
+        <p className="text-center text-gray-400 text-[10px] mt-8">Pix Online Uploader</p>
       </div>
     </div>
   );
