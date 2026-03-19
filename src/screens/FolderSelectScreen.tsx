@@ -184,19 +184,19 @@ export default function FolderSelectScreen({
   return (
     <div className="flex flex-col h-screen bg-dark-bg">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-dark-border pt-8">
+      <div className="px-6 py-4 border-b border-dark-border">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
               onClick={onBack}
-              className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-400 hover:text-white hover:border-brand-primary/50 transition-all"
+              className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-400 hover:text-gray-900 hover:border-brand-primary/50 transition-all"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
               </svg>
             </button>
             <div>
-              <h1 className="text-lg font-bold text-white">{galleryName}</h1>
+              <h1 className="text-lg font-bold text-gray-900">{galleryName}</h1>
               <p className="text-xs text-gray-500 mt-0.5">
                 {folders.length} תיקיות · {totalPhotos} תמונות
               </p>
@@ -207,7 +207,7 @@ export default function FolderSelectScreen({
             <button
               onClick={() => fetchFolders(true)}
               disabled={refreshing}
-              className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-500 hover:text-white hover:border-brand-primary/50 transition-all disabled:opacity-50"
+              className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-500 hover:text-gray-900 hover:border-brand-primary/50 transition-all disabled:opacity-50"
               title="רענון"
             >
               <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -245,7 +245,7 @@ export default function FolderSelectScreen({
               autoFocus
               disabled={creating}
               className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg
-                         text-white text-sm placeholder-gray-600 outline-none
+                         text-gray-900 text-sm placeholder-gray-400 outline-none
                          focus:border-brand-primary/50 transition-colors disabled:opacity-50"
             />
             <button
@@ -296,7 +296,7 @@ export default function FolderSelectScreen({
                   </svg>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-semibold text-white group-hover:text-brand-hover transition-colors">
+                  <h3 className="text-sm font-semibold text-gray-900 group-hover:text-brand-hover transition-colors">
                     העלאה לכל הגלריה
                   </h3>
                   <p className="text-xs text-gray-500 mt-0.5">
@@ -339,7 +339,7 @@ export default function FolderSelectScreen({
                   </svg>
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-medium text-white group-hover:text-brand-hover transition-colors truncate">
+                  <h3 className="text-sm font-medium text-gray-900 group-hover:text-brand-hover transition-colors truncate">
                     {folder.name}
                   </h3>
                   <p className="text-xs text-gray-600 mt-0.5">
