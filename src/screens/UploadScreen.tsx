@@ -362,7 +362,7 @@ export default function UploadScreen({
                       </svg>
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-gray-300 text-xs font-medium truncate">{file.name}</p>
+                      <p className="text-gray-700 text-xs font-medium truncate">{file.name}</p>
                       <p className="text-gray-600 text-[10px]">{formatFileSize(file.size)}</p>
                     </div>
                     <span className="text-[10px] text-amber-400/60 bg-amber-500/10 px-1.5 py-0.5 rounded">כפול</span>
@@ -379,7 +379,7 @@ export default function UploadScreen({
               <div className="mt-3 pt-3 border-t border-dark-border/50">
                 <div className="flex items-center justify-between text-xs" dir="rtl">
                   <span className="text-gray-500">סה״כ קבצים:</span>
-                  <span className="text-gray-300">{allPendingFiles.length}</span>
+                  <span className="text-gray-700">{allPendingFiles.length}</span>
                 </div>
                 <div className="flex items-center justify-between text-xs mt-1" dir="rtl">
                   <span className="text-amber-400/70">כפולים:</span>
@@ -408,7 +408,7 @@ export default function UploadScreen({
               {duplicateInfo.newFiles.length > 0 && (
                 <button
                   onClick={handleSkipDuplicates}
-                  className="w-full py-2.5 bg-dark-bg border border-gray-600 text-gray-300 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/30 hover:text-gray-100 transition-all duration-200"
+                  className="w-full py-2.5 bg-dark-bg border border-gray-400 text-gray-700 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/30 hover:text-gray-900 transition-all duration-200"
                 >
                   דלגו על כפולים, העלו רק חדשים ({duplicateInfo.newFiles.length})
                 </button>
@@ -493,7 +493,7 @@ export default function UploadScreen({
               <p className="text-gray-500 text-xs">ההעלאה תמשיך ברקע, ניתן לנווט חופשי</p>
             </div>
           ) : (
-            <div className="text-center relative z-10 px-6">
+            <div className="flex flex-col items-center justify-center text-center relative z-10 px-6 w-full">
               {/* Cloud upload icon */}
               <div className={`relative w-20 h-20 mx-auto mb-5 transition-all duration-300 ${isDragging ? 'scale-110 -translate-y-2' : ''}`}>
                 <div className={`w-20 h-20 rounded-2xl flex items-center justify-center transition-all duration-300 ${
@@ -519,7 +519,7 @@ export default function UploadScreen({
                 </>
               ) : (
                 <>
-                  <p className="text-gray-100 text-base font-semibold mb-1">גררו תמונות לכאן</p>
+                  <p className="text-gray-900 text-base font-semibold mb-1">גררו תמונות לכאן</p>
                   <p className="text-gray-500 text-xs mb-6">ההעלאה תתחיל אוטומטית ברגע שתשחררו</p>
 
                   <div className="flex items-center gap-3 justify-center mb-6">
@@ -531,7 +531,7 @@ export default function UploadScreen({
                     </button>
                     <button
                       onClick={handleAddFolder}
-                      className="px-6 py-2.5 bg-dark-card border border-gray-600 text-gray-200 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/50 hover:text-white transition-all duration-200 font-medium"
+                      className="px-6 py-2.5 bg-dark-card border border-gray-400 text-gray-700 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/50 hover:text-gray-900 transition-all duration-200 font-medium"
                     >
                       📁 בחרו תיקייה
                     </button>
