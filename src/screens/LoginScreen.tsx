@@ -149,7 +149,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                   onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
                   className="text-xs text-brand-primary hover:underline"
                 >
-                  שכחתי סיסמה
+                  יצירת סיסמה עבור משתמש Google
                 </button>
               </div>
               <div className="relative">
@@ -183,16 +183,19 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             </div>
 
             {/* Google users hint */}
-            <p className="text-xs text-gray-500 text-center">
-              נרשמת עם Google?{' '}
+            <div className="rounded-xl bg-blue-50/80 border border-blue-100 px-4 py-3 text-center">
+              <p className="text-xs text-blue-700 font-medium mb-1">נרשמת עם Google? 👋</p>
+              <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
+                האפלודר מחייב סיסמה — לחץ כאן וניצור לך אחת במהירות
+              </p>
               <button
                 type="button"
                 onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
-                className="text-brand-primary hover:underline font-medium"
+                className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium px-3 py-1.5 rounded-lg transition-colors"
               >
-                הגדר סיסמה לכניסה
+                צור סיסמה בחינם →
               </button>
-            </p>
+            </div>
 
             <button
               type="submit"
@@ -217,10 +220,16 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         {/* ===== FORGOT PASSWORD FORM ===== */}
         {mode === 'forgot' && (
           <form onSubmit={handleForgotPassword} className="space-y-4">
-            <div className="text-center mb-2">
-              <p className="text-sm text-gray-600 leading-relaxed">
-                הזן את המייל שלך ונשלח לך קישור לאיפוס סיסמה.<br />
-                <span className="text-gray-500 text-xs">גם אם נרשמת עם Google — השתמש באותו מייל.</span>
+            <div className="text-center mb-4">
+              <div className="w-12 h-12 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-3">
+                <svg className="w-6 h-6 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                </svg>
+              </div>
+              <p className="text-sm font-medium text-gray-900 mb-1">שלב 1 מתוך 2</p>
+              <p className="text-xs text-gray-500 leading-relaxed">
+                הזן את המייל של חשבון Google שלך.<br />
+                נשלח לך קישור — לחץ עליו ובחר סיסמה.
               </p>
             </div>
             <div>
@@ -251,7 +260,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                   שולח...
                 </span>
               ) : (
-                'שלח קישור לאיפוס'
+                'שלח קישור ליצירת סיסמה'
               )}
             </button>
 
@@ -276,8 +285,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             <div>
               <p className="text-sm font-medium text-gray-900">מייל נשלח!</p>
               <p className="text-xs text-gray-500 mt-1 leading-relaxed">
-                בדוק את תיבת הדואר שלך ולחץ על הקישור לאיפוס הסיסמה.<br />
-                לאחר הגדרת הסיסמה, תוכל להתחבר כאן.
+                בדוק את תיבת הדואר שלך ולחץ על הקישור ליצירת הסיסמה.
+                לאחר יצירת הסיסמה, תוכל להתחבר לאפלודר.
               </p>
             </div>
             <button
