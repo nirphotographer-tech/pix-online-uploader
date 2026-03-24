@@ -196,7 +196,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
           {/* Google users - OUTSIDE form so button works */}
           <div className="mt-3 border border-blue-100 bg-blue-50/80 px-4 py-3 text-center">
             <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
-              נרשמת עם Google? האפלודר מחייב סיסמה
+              נרשמת עם Google? יש ליצור סיסמה עבור התחברות ל-Uploader
             </p>
             <button
               type="button"
