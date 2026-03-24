@@ -109,10 +109,13 @@ const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 700,
-    minWidth: 700,
-    minHeight: 500,
+    width: 480,
+    height: 540,
+    minWidth: 480,
+    minHeight: 540,
+    maxWidth: 480,
+    maxHeight: 540,
+    resizable: false,
     backgroundColor: '#0f0f0f',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 15, y: 10 },
