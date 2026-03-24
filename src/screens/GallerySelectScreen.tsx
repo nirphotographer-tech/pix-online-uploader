@@ -139,7 +139,7 @@ export default function GallerySelectScreen({
   };
 
   return (
-    <div className="flex flex-col h-screen bg-dark-bg">
+    <div className="flex flex-col h-full overflow-hidden bg-dark-bg">
       {/* Header */}
       <div className="px-6 py-4 border-b border-dark-border">
         <div className="flex items-center justify-between mb-4">
@@ -201,7 +201,7 @@ export default function GallerySelectScreen({
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-5">
+      <div className="flex-1 overflow-y-scroll p-5 min-h-0">
         {loading ? (
           /* Skeleton loading */
           <div className="grid grid-cols-2 gap-3 animate-fade-in">

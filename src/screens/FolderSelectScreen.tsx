@@ -167,7 +167,7 @@ export default function FolderSelectScreen({
   // Show loading during auto-skip too
   if (loading || (autoSkipped && folders.length <= 1)) {
     return (
-      <div className="flex flex-col h-screen bg-dark-bg">
+      <div className="flex flex-col h-full overflow-hidden bg-dark-bg">
         <div className="flex items-center justify-center flex-1">
           <div className="text-center">
             <svg className="animate-spin w-8 h-8 text-brand-primary mx-auto mb-3" viewBox="0 0 24 24" fill="none">
@@ -182,7 +182,7 @@ export default function FolderSelectScreen({
   }
 
   return (
-    <div className="flex flex-col h-screen bg-dark-bg">
+    <div className="flex flex-col h-full overflow-hidden bg-dark-bg">
       {/* Header */}
       <div className="px-6 py-4 border-b border-dark-border">
         <div className="flex items-center justify-between">
@@ -192,7 +192,7 @@ export default function FolderSelectScreen({
               className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-400 hover:text-gray-900 hover:border-brand-primary/50 transition-all"
             >
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
               </svg>
             </button>
             <div>
@@ -268,7 +268,7 @@ export default function FolderSelectScreen({
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-5">
+      <div className="flex-1 overflow-y-scroll p-5 min-h-0">
         {!showNewFolder && error ? (
           <div className="flex flex-col items-center justify-center h-full">
             <p className="text-red-400 text-sm mb-3">{error}</p>

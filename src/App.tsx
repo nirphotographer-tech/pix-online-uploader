@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.3.3';
+const APP_VERSION = '2.3.7';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -421,7 +421,7 @@ export default function App() {
 
       {/* Main content area with transition */}
       <div
-        className={`flex-1 overflow-hidden transition-opacity duration-150 ${
+        className={`flex-1 h-full overflow-visible transition-opacity duration-150 ${
           screenTransition ? 'opacity-0' : 'opacity-100'
         }`}
       >

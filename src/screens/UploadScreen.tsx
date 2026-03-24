@@ -261,7 +261,7 @@ export default function UploadScreen({
   };
 
   return (
-    <div className="flex flex-col h-screen bg-dark-bg">
+    <div className="flex flex-col h-screen overflow-hidden bg-dark-bg">
       {/* Header */}
       <div className="flex items-center gap-3 px-6 py-4 border-b border-dark-border">
         <button
@@ -428,7 +428,7 @@ export default function UploadScreen({
 
       {/* Drop zone */}
       <div
-        className="flex-1 overflow-y-auto p-5"
+        className="flex-1 overflow-y-scroll p-5 min-h-0"
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
