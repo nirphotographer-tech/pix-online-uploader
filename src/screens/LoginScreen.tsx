@@ -142,16 +142,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             </div>
 
             <div>
-              <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs text-gray-500 font-medium">סיסמה</label>
-                <button
-                  type="button"
-                  onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
-                  className="text-xs text-brand-primary hover:underline"
-                >
-                  יצירת סיסמה עבור משתמש Google
-                </button>
-              </div>
+              <label className="block text-xs text-gray-500 font-medium mb-1.5">סיסמה</label>
               <div className="relative">
                 <input
                   type={showPassword ? 'text' : 'password'}
@@ -182,25 +173,10 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               </div>
             </div>
 
-            {/* Google users hint */}
-            <div className="rounded-xl bg-blue-50/80 border border-blue-100 px-4 py-3 text-center">
-              <p className="text-xs text-blue-700 font-medium mb-1">נרשמת עם Google? 👋</p>
-              <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
-                האפלודר מחייב סיסמה — לחץ כאן וניצור לך אחת במהירות
-              </p>
-              <button
-                type="button"
-                onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
-                className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium px-3 py-1.5 rounded-lg transition-colors"
-              >
-                צור סיסמה בחינם →
-              </button>
-            </div>
-
             <button
               type="submit"
               disabled={loading || !identifier || !password}
-              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm mt-2 hover:shadow-lg hover:shadow-brand-primary/25 hover:-translate-y-0.5 active:translate-y-0 active:shadow-md"
+              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-none transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm mt-2 hover:shadow-lg hover:shadow-brand-primary/25 hover:-translate-y-0.5 active:translate-y-0 active:shadow-md"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
@@ -215,6 +191,20 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               )}
             </button>
           </form>
+
+          {/* Google users - OUTSIDE form so button works */}
+          <div className="mt-3 border border-blue-100 bg-blue-50/80 px-4 py-3 text-center">
+            <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
+              נרשמת עם Google? האפלודר מחייב סיסמה
+            </p>
+            <button
+              type="button"
+              onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
+              className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 py-2 rounded-none transition-colors w-full"
+            >
+              צור סיסמה
+            </button>
+          </div>
         )}
 
         {/* ===== FORGOT PASSWORD FORM ===== */}
@@ -249,7 +239,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             <button
               type="submit"
               disabled={loading || !forgotEmail.trim()}
-              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm hover:shadow-lg hover:shadow-brand-primary/25"
+              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-none transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm hover:shadow-lg hover:shadow-brand-primary/25"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
@@ -292,7 +282,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             <button
               type="button"
               onClick={() => { setMode('login'); setError(''); }}
-              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-xl text-sm"
+              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-none text-sm"
             >
               חזרה להתחברות
             </button>
