@@ -104,8 +104,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
       <div className="w-full max-w-sm px-8 relative z-10 animate-slide-up">
         {/* Logo / Title */}
-        <div className="text-center mb-10">
-          <div className="relative w-20 h-20 mx-auto mb-5">
+        <div className="flex flex-col items-center mb-10">
+          <div className="relative w-20 h-20 mb-5">
             <img
               src="/icon.png"
               alt="Pix Online"
@@ -126,6 +126,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
         {/* ===== LOGIN FORM ===== */}
         {mode === 'login' && (
+          <>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-xs text-gray-500 mb-1.5 font-medium">אימייל או שם משתמש</label>
@@ -205,13 +206,14 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               צור סיסמה
             </button>
           </div>
+          </>
         )}
 
         {/* ===== FORGOT PASSWORD FORM ===== */}
         {mode === 'forgot' && (
           <form onSubmit={handleForgotPassword} className="space-y-4">
-            <div className="text-center mb-4">
-              <div className="w-12 h-12 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-3">
+            <div className="flex flex-col items-center text-center mb-4">
+              <div className="w-12 h-12 bg-blue-50 rounded-full flex items-center justify-center mb-3">
                 <svg className="w-6 h-6 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
@@ -266,8 +268,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
         {/* ===== FORGOT SENT CONFIRMATION ===== */}
         {mode === 'forgot-sent' && (
-          <div className="text-center space-y-4">
-            <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto">
+          <div className="flex flex-col items-center space-y-4">
+            <div className="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center">
               <svg className="w-7 h-7 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
               </svg>
