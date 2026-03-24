@@ -102,7 +102,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         <div className="absolute bottom-[-20%] left-[-10%] w-[400px] h-[400px] bg-brand-hover/[0.06] rounded-full blur-3xl" />
       </div>
 
-      <div className="w-full max-w-sm px-8 relative z-10 animate-slide-up">
+      <div className="w-full max-w-sm px-8 relative z-10 animate-slide-up mx-auto flex flex-col items-center">
         {/* Logo / Title */}
         <div className="flex flex-col items-center mb-10">
           <div className="relative w-20 h-20 mb-5">
@@ -113,8 +113,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
             />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">Pix Online</h1>
-          <p className="text-gray-500 text-sm mt-1.5">כלי העלאה מהיר לצלמים</p>
+          <h1 className="text-2xl font-bold text-gray-900 text-center">Pix Online</h1>
+          <p className="text-gray-500 text-sm mt-1.5 text-center">כלי העלאה מהיר לצלמים</p>
         </div>
 
         {/* Error */}
@@ -126,8 +126,8 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
         {/* ===== LOGIN FORM ===== */}
         {mode === 'login' && (
-          <>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="w-full">
+          <form onSubmit={handleSubmit} className="space-y-4 w-full">
             <div>
               <label className="block text-xs text-gray-500 mb-1.5 font-medium">אימייל או שם משתמש</label>
               <input
@@ -206,12 +206,12 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               צור סיסמה
             </button>
           </div>
-          </>
+          </div>
         )}
 
         {/* ===== FORGOT PASSWORD FORM ===== */}
         {mode === 'forgot' && (
-          <form onSubmit={handleForgotPassword} className="space-y-4">
+          <form onSubmit={handleForgotPassword} className="space-y-4 w-full">
             <div className="flex flex-col items-center text-center mb-4">
               <div className="w-12 h-12 bg-blue-50 rounded-full flex items-center justify-center mb-3">
                 <svg className="w-6 h-6 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
