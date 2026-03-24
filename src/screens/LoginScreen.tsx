@@ -202,14 +202,14 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
           </form>
 
           {/* Google users - OUTSIDE form so button works */}
-          <div className="mt-8 border-t border-gray-200 pt-6 border-blue-100 bg-blue-50/80 px-4 py-3 text-center">
-            <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
+          <div className="mt-10 pt-6 border-t-2 border-gray-200">
+            <p className="text-[11px] text-gray-500 mb-3 text-center leading-relaxed">
               נרשמת עם Google? יש ליצור סיסמה עבור התחברות ל-Uploader
             </p>
             <button
               type="button"
               onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
-              className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 py-2 rounded-none transition-colors w-full"
+              className="w-full py-2.5 bg-white border-2 border-blue-500 text-blue-600 hover:bg-blue-50 font-medium text-sm rounded-none transition-colors cursor-pointer"
             >
               צור סיסמה
             </button>
