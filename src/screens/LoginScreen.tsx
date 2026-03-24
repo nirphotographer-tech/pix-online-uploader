@@ -194,7 +194,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
           </form>
 
           {/* Google users - OUTSIDE form so button works */}
-          <div className="mt-3 border border-blue-100 bg-blue-50/80 px-4 py-3 text-center">
+          <div className="mt-8 border-t border-gray-200 pt-6 border-blue-100 bg-blue-50/80 px-4 py-3 text-center">
             <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
               נרשמת עם Google? יש ליצור סיסמה עבור התחברות ל-Uploader
             </p>
