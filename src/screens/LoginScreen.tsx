@@ -105,16 +105,24 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
       <div className="w-full max-w-sm px-8 relative z-10 animate-slide-up mx-auto flex flex-col items-center">
         {/* Logo / Title */}
         <div className="flex flex-col items-center mb-10">
-          <div className="relative w-20 h-20 mb-5">
+          <div className="relative w-20 h-20 mb-4">
             <img
-              src="/icon.png"
+              src="./icon.png"
               alt="Pix Online"
               className="w-20 h-20 rounded-2xl object-contain"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+              onError={(e) => {
+                const el = e.target as HTMLImageElement;
+                el.style.display = 'none';
+                const fallback = document.createElement('div');
+                fallback.className = 'w-20 h-20 rounded-2xl bg-brand-primary flex items-center justify-center text-white text-3xl font-bold';
+                fallback.textContent = 'P';
+                el.parentNode?.appendChild(fallback);
+              }}
             />
           </div>
           <h1 className="text-2xl font-bold text-gray-900 text-center">Pix Online</h1>
-          <p className="text-gray-500 text-sm mt-1.5 text-center">כלי העלאה מהיר לצלמים</p>
+          <p className="text-gray-500 text-sm mt-1 text-center">כלי העלאה מהיר לצלמים</p>
+          <span className="text-[10px] text-gray-400 mt-1">v2.4.0</span>
         </div>
 
         {/* Error */}
@@ -292,7 +300,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         )}
 
         {/* Bottom subtle branding */}
-        <p className="text-center text-gray-400 text-[10px] mt-8">Pix Online Uploader</p>
+        
       </div>
     </div>
   );
