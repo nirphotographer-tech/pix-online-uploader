@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo, PendingSession } from '../electron/preload';
 
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.5.1';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -450,7 +450,7 @@ export default function App() {
             return (
               <div
                 key={pending.sessionId}
-                className="flex items-center gap-3 bg-brand-primary/10 border border-brand-primary/30 rounded-xl px-4 py-3 shadow-lg"
+                className="flex items-center gap-3 bg-[#1a1a2e] border border-[#7c5ff6] rounded-xl px-4 py-3 shadow-xl"
               >
                 <span className="text-lg flex-shrink-0">📤</span>
                 <div className="flex-1 min-w-0">
