@@ -78,6 +78,8 @@ interface StoreSchema {
 }
 
 const store = new Store<StoreSchema>({
+  name: 'session',          // saved to userData/session.json — stable across versions
+  clearInvalidConfig: false, // never wipe session data on schema mismatch
   defaults: {
     session: null,
   },

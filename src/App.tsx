@@ -7,7 +7,7 @@ import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo, PendingSession } from '../electron/preload';
 
-const APP_VERSION = '2.5.1';
+const APP_VERSION = '2.5.2';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -64,36 +64,64 @@ export default function App() {
           return;
         }
         const saved = await window.electronAPI.store.getSession();
-        if (saved) {
-          const { data, error } = await supabase.auth.setSession({
-            access_token: saved.access_token,
-            refresh_token: saved.refresh_token,
-          });
-
-          if (error || !data.session) {
-            await window.electronAPI.store.clearSession();
-            setLoading(false);
-            return;
-          }
-
-          const freshToken = data.session.access_token;
-          const freshRefresh = data.session.refresh_token;
-          await window.electronAPI.store.setSession({
-            access_token: freshToken,
-            refresh_token: freshRefresh,
-            user_id: data.session.user.id,
-            email: data.session.user.email || saved.email,
-          });
-
-          setAuth({
-            token: freshToken,
-            userId: data.session.user.id,
-            email: data.session.user.email || saved.email,
-          });
-          setScreen('galleries');
+        if (!saved) {
+          setLoading(false);
+          return;
         }
-      } catch {
-        // No saved session, stay on login
+
+        // Retry up to 3 times in case of network/timeout errors on cold start
+        let lastError: unknown = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const { data, error } = await supabase.auth.setSession({
+              access_token: saved.access_token,
+              refresh_token: saved.refresh_token,
+            });
+
+            if (error) {
+              // Auth error (token revoked / invalid) — don't retry, clear session
+              console.warn('[Auth] Session restore failed (auth error):', error.message);
+              await window.electronAPI.store.clearSession();
+              setLoading(false);
+              return;
+            }
+
+            if (!data.session) {
+              await window.electronAPI.store.clearSession();
+              setLoading(false);
+              return;
+            }
+
+            const freshToken = data.session.access_token;
+            const freshRefresh = data.session.refresh_token;
+            await window.electronAPI.store.setSession({
+              access_token: freshToken,
+              refresh_token: freshRefresh,
+              user_id: data.session.user.id,
+              email: data.session.user.email || saved.email,
+            });
+
+            setAuth({
+              token: freshToken,
+              userId: data.session.user.id,
+              email: data.session.user.email || saved.email,
+            });
+            setScreen('galleries');
+            setLoading(false);
+            return; // success
+          } catch (err) {
+            lastError = err;
+            console.warn(`[Auth] Session restore attempt ${attempt}/3 failed:`, err);
+            if (attempt < 3) {
+              // Wait before retrying (1s, then 2s)
+              await new Promise((r) => setTimeout(r, attempt * 1000));
+            }
+          }
+        }
+
+        // All retries exhausted — network issue, but keep the saved session
+        // so next launch can try again. Don't clear it.
+        console.error('[Auth] Session restore failed after 3 attempts, will retry next launch:', lastError);
       } finally {
         setLoading(false);
       }
