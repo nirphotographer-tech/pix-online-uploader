@@ -5,7 +5,7 @@ import FolderSelectScreen from './screens/FolderSelectScreen';
 import UploadScreen from './screens/UploadScreen';
 import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
-import type { UploadSessionInfo } from '../electron/preload';
+import type { UploadSessionInfo, PendingSession } from '../electron/preload';
 
 const APP_VERSION = '2.4.0';
 
@@ -36,6 +36,7 @@ export default function App() {
   const [galleryKey, setGalleryKey] = useState(0);
   const [folderKey, setFolderKey] = useState(0);
   const [uploadSessions, setUploadSessions] = useState<UploadSessionInfo[]>([]);
+  const [pendingSessions, setPendingSessions] = useState<PendingSession[]>([]);
   const pendingDeepLinkRef = useRef<any>(null);
   const [screenTransition, setScreenTransition] = useState(false);
   const [toastNotifications, setToastNotifications] = useState<Array<{
@@ -104,6 +105,13 @@ export default function App() {
   // Listen to upload session events + broadcast to Supabase Realtime
   useEffect(() => {
     if (!window.electronAPI) return;
+
+    // Load any sessions that were interrupted by a previous app quit
+    window.electronAPI.pendingUploads.getSessions().then((sessions) => {
+      if (sessions.length > 0) {
+        setPendingSessions(sessions);
+      }
+    }).catch(() => {/* ignore */});
 
     const channels = new Map<string, ReturnType<typeof supabase.channel>>();
     const channelReady = new Map<string, boolean>();
@@ -349,6 +357,8 @@ export default function App() {
 
   const handleLogout = useCallback(async () => {
     await window.electronAPI.store.clearSession();
+    await window.electronAPI.pendingUploads.clearAll();
+    setPendingSessions([]);
     setAuth(null);
     setGallery(null);
     setFolder(null);
@@ -373,6 +383,47 @@ export default function App() {
     setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
   }, []);
 
+  // Resume a session that was interrupted when the app quit
+  const handleResumePendingSession = useCallback(async (pending: PendingSession) => {
+    if (!auth) return;
+
+    // Filter out files that already completed
+    const remainingFiles = pending.files.filter(
+      (f) => !pending.completedFileNames.includes(f.name)
+    );
+    if (remainingFiles.length === 0) {
+      await window.electronAPI.pendingUploads.dismissSession(pending.sessionId);
+      setPendingSessions((prev) => prev.filter((s) => s.sessionId !== pending.sessionId));
+      return;
+    }
+
+    // Refresh the auth token before resuming
+    let token = auth.token;
+    try {
+      const { data } = await supabase.auth.refreshSession();
+      if (data.session) token = data.session.access_token;
+    } catch { /* use existing token */ }
+
+    // Start upload with remaining files (reuse same sessionId so persistence tracks it)
+    await window.electronAPI.upload.startSession(
+      pending.sessionId,
+      remainingFiles,
+      pending.galleryId,
+      pending.galleryName,
+      pending.folderId,
+      pending.folderName,
+      token
+    );
+
+    // Remove from pending banner
+    setPendingSessions((prev) => prev.filter((s) => s.sessionId !== pending.sessionId));
+  }, [auth]);
+
+  const handleDismissPendingSession = useCallback(async (sessionId: string) => {
+    await window.electronAPI.pendingUploads.dismissSession(sessionId);
+    setPendingSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+  }, []);
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-dark-bg gap-3">
@@ -391,6 +442,47 @@ export default function App() {
     <div className="flex flex-col h-screen">
       {/* macOS traffic light drag region */}
       <div className="h-9 flex-shrink-0" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
+      {/* Resume upload banner — shown after app restart if uploads were interrupted */}
+      {screen !== 'login' && pendingSessions.length > 0 && (
+        <div className="fixed top-14 left-3 right-3 z-50 flex flex-col gap-2">
+          {pendingSessions.map((pending) => {
+            const remaining = pending.files.length - pending.completedFileNames.length;
+            return (
+              <div
+                key={pending.sessionId}
+                className="flex items-center gap-3 bg-brand-primary/10 border border-brand-primary/30 rounded-xl px-4 py-3 shadow-lg"
+              >
+                <span className="text-lg flex-shrink-0">📤</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-white leading-tight truncate">
+                    {pending.galleryName}
+                    {pending.folderName ? ` / ${pending.folderName}` : ''}
+                  </p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    נשארו {remaining} תמונות להעלאה
+                  </p>
+                </div>
+                <button
+                  onClick={() => handleResumePendingSession(pending)}
+                  className="flex-shrink-0 bg-brand-primary hover:bg-brand-hover text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  המשך
+                </button>
+                <button
+                  onClick={() => handleDismissPendingSession(pending.sessionId)}
+                  className="flex-shrink-0 text-gray-500 hover:text-gray-300 transition-colors"
+                  title="בטל"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                    <path d="M18 6L6 18M6 6l12 12"/>
+                  </svg>
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Toast notifications */}
       {toastNotifications.length > 0 && (
         <div className="fixed top-14 right-3 z-50 flex flex-col gap-2 pointer-events-none">

@@ -10,6 +10,12 @@ import path from 'path';
 import fs from 'fs';
 import Store from 'electron-store';
 import { UploadManager, UploadSessionInfo } from './uploadManager';
+import {
+  loadPendingSessions,
+  removePendingSession,
+  clearAllPendingSessions,
+  PendingSession,
+} from './uploadPersistence';
 
 // File-based logging for debugging
 const LOG_FILE = path.join(require("os").homedir(), "pix-uploader-debug.log");
@@ -447,3 +453,20 @@ ipcMain.handle(
     }
   }
 );
+
+// ── Pending sessions IPC ──
+
+/** Renderer requests the list of sessions interrupted by a previous quit */
+ipcMain.handle('upload:getPendingSessions', (): PendingSession[] => {
+  return loadPendingSessions();
+});
+
+/** Renderer dismisses a pending session (user chose not to resume it) */
+ipcMain.handle('upload:dismissPendingSession', (_event, sessionId: string) => {
+  removePendingSession(sessionId);
+});
+
+/** Renderer requests to clear all pending sessions (e.g. on logout) */
+ipcMain.handle('upload:clearPendingSessions', () => {
+  clearAllPendingSessions();
+});

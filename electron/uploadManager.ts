@@ -5,6 +5,11 @@
  */
 
 import { UploadQueue, ProgressPayload, StatsPayload } from './uploadQueue';
+import {
+  savePendingSession,
+  removePendingSession,
+  markFileCompleted,
+} from './uploadPersistence';
 
 export interface UploadSessionInfo {
   sessionId: string;
@@ -82,6 +87,19 @@ export class UploadManager {
       status: 'uploading',
     };
 
+    // Persist session so it can be resumed if the app quits mid-upload
+    savePendingSession({
+      sessionId,
+      galleryId,
+      galleryName,
+      folderId,
+      folderName,
+      files,
+      completedFileNames: [],
+      token,
+      savedAt: Date.now(),
+    });
+
     const queue = new UploadQueue({
       concurrency: this.options.concurrency,
       apiBaseUrl: this.options.apiBaseUrl,
@@ -98,9 +116,15 @@ export class UploadManager {
         info.eta = progress.eta;
         this.options.onSessionUpdate({ ...info });
       },
-      onFileComplete: (_fileId: string, success: boolean) => {
+      onFileComplete: (fileId: string, success: boolean) => {
         if (success) {
           info.completedFiles++;
+          // Track per-file completion so resume skips done files
+          const entry = this.sessions.get(sessionId);
+          if (entry) {
+            const fileName = entry.queue.getFileName(fileId);
+            if (fileName) markFileCompleted(sessionId, fileName);
+          }
         } else {
           info.failedFiles++;
         }
@@ -113,6 +137,8 @@ export class UploadManager {
         info.failedFiles = stats.failed;
         this.options.onSessionUpdate({ ...info });
         this.options.onSessionComplete({ ...info });
+        // Remove from persistence — upload finished
+        removePendingSession(sessionId);
         this.checkAllComplete();
       },
     });
@@ -134,6 +160,7 @@ export class UploadManager {
     if (entry) {
       entry.queue.cancel();
       this.sessions.delete(sessionId);
+      removePendingSession(sessionId);
       console.log(`[UploadManager] Cancelled session ${sessionId}`);
       this.checkAllComplete();
     }

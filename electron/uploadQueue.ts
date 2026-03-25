@@ -237,6 +237,11 @@ export class UploadQueue {
     }
   }
 
+  /** Get the filename for a given file id (used by UploadManager for persistence) */
+  getFileName(fileId: string): string | undefined {
+    return this.files.find((f) => f.id === fileId)?.name;
+  }
+
   // ============================================================================
   // Core loop — picks next pending file and runs the pipeline
   // ============================================================================
