@@ -217,7 +217,103 @@ export class UploadQueue {
     this.lastCheckTime = Date.now();
     this.isCancelled = false;
     this.isPaused = false;
-    this.processNext();
+
+    // Pre-upload storage check — block entire batch if not enough space
+    this.checkStorageBeforeStart()
+      .then((canProceed) => {
+        if (canProceed) {
+          this.processNext();
+        }
+      })
+      .catch((err) => {
+        console.error('[Upload] Storage pre-check failed:', err);
+        // On error, proceed anyway — server will block if needed
+        this.processNext();
+      });
+  }
+
+  /**
+   * Check storage quota before starting uploads.
+   * Returns true if we can proceed, false if storage is full.
+   */
+  private async checkStorageBeforeStart(): Promise<boolean> {
+    try {
+      const totalBatchSize = this.files.reduce((sum, f) => sum + f.size, 0);
+      console.log(`[Upload] 📊 Pre-upload storage check: ${this.files.length} files, ${(totalBatchSize / 1024 / 1024).toFixed(0)}MB total`);
+
+      const res = await fetch(`${this.options.apiBaseUrl}/api/storage/check`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.currentToken}`,
+        },
+        body: JSON.stringify({ userId: null }), // server extracts from token
+        signal: AbortSignal.timeout(15_000),
+      });
+
+      if (!res.ok) {
+        console.warn(`[Upload] Storage check HTTP ${res.status} — proceeding anyway`);
+        return true;
+      }
+
+      const data = await res.json() as { info?: { can_upload: boolean; used_bytes: number; limit_bytes: number | null; plan_name: string } };
+      const info = data.info;
+
+      if (!info) {
+        console.warn('[Upload] Storage check returned no info — proceeding');
+        return true;
+      }
+
+      console.log(`[Upload] 📊 Storage: ${(info.used_bytes / 1024 / 1024 / 1024).toFixed(2)}GB / ${info.limit_bytes ? (info.limit_bytes / 1024 / 1024 / 1024).toFixed(1) + 'GB' : 'UNLIMITED'} (${info.plan_name})`);
+
+      // Check 1: Already full
+      if (!info.can_upload) {
+        console.error('[Upload] 🚫 Storage is FULL — blocking entire batch');
+        this.abortAllWithStorageError(info);
+        return false;
+      }
+
+      // Check 2: Batch would exceed remaining space
+      if (info.limit_bytes) {
+        const remaining = info.limit_bytes - info.used_bytes;
+        if (totalBatchSize > remaining) {
+          console.error(`[Upload] 🚫 Batch too large: ${(totalBatchSize / 1024 / 1024).toFixed(0)}MB > ${(remaining / 1024 / 1024).toFixed(0)}MB remaining`);
+          this.abortAllWithStorageError(info);
+          return false;
+        }
+      }
+
+      console.log('[Upload] ✅ Storage check passed — proceeding with uploads');
+      return true;
+    } catch (err) {
+      console.warn('[Upload] Storage pre-check error (proceeding anyway):', err);
+      return true;
+    }
+  }
+
+  /**
+   * Mark all files as failed due to storage limit
+   */
+  private abortAllWithStorageError(info: { used_bytes: number; limit_bytes: number | null; plan_name: string }): void {
+    const usedGB = (info.used_bytes / 1024 / 1024 / 1024).toFixed(2);
+    const limitGB = info.limit_bytes ? (info.limit_bytes / 1024 / 1024 / 1024).toFixed(1) : 'unlimited';
+    const errorMsg = `אין מספיק מקום באחסון (${usedGB}GB / ${limitGB}GB). שדרגו את החבילה.`;
+
+    for (const file of this.files) {
+      if (file.status === 'pending') {
+        file.status = 'error';
+        file.error = errorMsg;
+      }
+    }
+
+    // Trigger completion with all files failed
+    const totalTime = Math.round((Date.now() - this.startTime) / 1000);
+    this.options.onAllComplete({
+      total: this.files.length,
+      success: 0,
+      failed: this.files.length,
+      totalTime,
+    });
   }
 
   pause(): void { this.isPaused = true; }
