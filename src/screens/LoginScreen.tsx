@@ -134,8 +134,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
         {/* ===== LOGIN FORM ===== */}
         {mode === 'login' && (
-          <div className="w-full">
-          <form onSubmit={handleSubmit} className="space-y-4 w-full">
+          <form onSubmit={handleSubmit} className="space-y-4">
             <div>
               <label className="block text-xs text-gray-500 mb-1.5 font-medium">אימייל או שם משתמש</label>
               <input
@@ -151,7 +150,16 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             </div>
 
             <div>
-              <label className="block text-xs text-gray-500 font-medium mb-1.5">סיסמה</label>
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="block text-xs text-gray-500 font-medium">סיסמה</label>
+                <button
+                  type="button"
+                  onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
+                  className="text-xs text-brand-primary hover:underline"
+                >
+                  שכחתי סיסמה
+                </button>
+              </div>
               <div className="relative">
                 <input
                   type={showPassword ? 'text' : 'password'}
@@ -182,10 +190,25 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               </div>
             </div>
 
+            {/* Google users hint */}
+            <div className="rounded-xl bg-blue-50/80 border border-blue-100 px-4 py-3 text-center">
+              <p className="text-xs text-blue-700 font-medium mb-1">נרשמת עם Google? 👋</p>
+              <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
+                האפלודר מחייב סיסמה — לחץ כאן וניצור לך אחת במהירות
+              </p>
+              <button
+                type="button"
+                onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
+                className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium px-3 py-1.5 rounded-lg transition-colors"
+              >
+                צור סיסמה בחינם →
+              </button>
+            </div>
+
             <button
               type="submit"
               disabled={loading || !identifier || !password}
-              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-none transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm mt-2 hover:shadow-lg hover:shadow-brand-primary/25 hover:-translate-y-0.5 active:translate-y-0 active:shadow-md"
+              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm mt-2 hover:shadow-lg hover:shadow-brand-primary/25 hover:-translate-y-0.5 active:translate-y-0 active:shadow-md"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
@@ -200,26 +223,11 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               )}
             </button>
           </form>
-
-          {/* Google users - OUTSIDE form so button works */}
-          <div className="mt-10 pt-6 border-t-2 border-gray-200">
-            <p className="text-[11px] text-gray-500 mb-3 text-center leading-relaxed">
-              נרשמת עם Google? יש ליצור סיסמה עבור התחברות ל-Uploader
-            </p>
-            <button
-              type="button"
-              onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
-              className="w-full py-2.5 bg-white border-2 border-blue-500 text-blue-600 hover:bg-blue-50 font-medium text-sm rounded-none transition-colors cursor-pointer"
-            >
-              צור סיסמה
-            </button>
-          </div>
-          </div>
         )}
 
         {/* ===== FORGOT PASSWORD FORM ===== */}
         {mode === 'forgot' && (
-          <form onSubmit={handleForgotPassword} className="space-y-4 w-full">
+          <form onSubmit={handleForgotPassword} className="space-y-4">
             <div className="flex flex-col items-center text-center mb-4">
               <div className="w-12 h-12 bg-blue-50 rounded-full flex items-center justify-center mb-3">
                 <svg className="w-6 h-6 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -249,7 +257,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             <button
               type="submit"
               disabled={loading || !forgotEmail.trim()}
-              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-none transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm hover:shadow-lg hover:shadow-brand-primary/25"
+              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-xl transition-all disabled:opacity-40 disabled:cursor-not-allowed text-sm hover:shadow-lg hover:shadow-brand-primary/25"
             >
               {loading ? (
                 <span className="flex items-center justify-center gap-2">
@@ -292,7 +300,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             <button
               type="button"
               onClick={() => { setMode('login'); setError(''); }}
-              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-none text-sm"
+              className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-xl text-sm"
             >
               חזרה להתחברות
             </button>

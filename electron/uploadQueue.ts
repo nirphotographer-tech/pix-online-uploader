@@ -51,6 +51,7 @@ export interface StatsPayload {
   success: number;
   failed: number;
   totalTime: number;
+  errorMessage?: string;
 }
 
 interface PresignResponse {
@@ -150,6 +151,7 @@ export class UploadQueue {
   private activeProcessCalls = 0;
   private readonly maxProcessConcurrency = 2;
   private processWaiters: Array<() => void> = [];
+  private storageErrorMsg: string | null = null;
 
   // Current token — starts with the one from options but can be refreshed
   private currentToken: string;
@@ -297,12 +299,12 @@ export class UploadQueue {
   private abortAllWithStorageError(info: { used_bytes: number; limit_bytes: number | null; plan_name: string }): void {
     const usedGB = (info.used_bytes / 1024 / 1024 / 1024).toFixed(2);
     const limitGB = info.limit_bytes ? (info.limit_bytes / 1024 / 1024 / 1024).toFixed(1) : 'unlimited';
-    const errorMsg = `אין מספיק מקום באחסון (${usedGB}GB / ${limitGB}GB). שדרגו את החבילה.`;
+    this.storageErrorMsg = `אין מספיק מקום באחסון (${usedGB}GB / ${limitGB}GB). שדרגו את החבילה.`;
 
     for (const file of this.files) {
       if (file.status === 'pending') {
         file.status = 'error';
-        file.error = errorMsg;
+        file.error = this.storageErrorMsg || 'Storage error';
       }
     }
 
@@ -313,6 +315,7 @@ export class UploadQueue {
       success: 0,
       failed: this.files.length,
       totalTime,
+      errorMessage: this.storageErrorMsg || undefined,
     });
   }
 

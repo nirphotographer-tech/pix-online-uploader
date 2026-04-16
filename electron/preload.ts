@@ -22,6 +22,7 @@ export interface UploadSessionInfo {
   speed: number;
   eta: number;
   status: 'uploading' | 'done' | 'error';
+  errorMessage?: string;
 }
 
 export interface DeepLinkPayload {
@@ -30,18 +31,6 @@ export interface DeepLinkPayload {
   galleryName: string;
   folderId: string;
   folderName: string;
-}
-
-export interface PendingSession {
-  sessionId: string;
-  galleryId: string;
-  galleryName: string;
-  folderId: string;
-  folderName: string;
-  files: UploadFileInfo[];
-  completedFileNames: string[];
-  token: string;
-  savedAt: number;
 }
 
 export interface ElectronAPI {
@@ -106,11 +95,6 @@ export interface ElectronAPI {
       fileNames: string[],
       token: string
     ) => Promise<{ file_name: string; id: string; size_bytes: number | null }[]>;
-  };
-  pendingUploads: {
-    getSessions: () => Promise<PendingSession[]>;
-    dismissSession: (sessionId: string) => Promise<void>;
-    clearAll: () => Promise<void>;
   };
 }
 
@@ -189,11 +173,6 @@ const electronAPI: ElectronAPI = {
   gallery: {
     checkDuplicates: (galleryId, folderId, fileNames, token) =>
       ipcRenderer.invoke('gallery:checkDuplicates', galleryId, folderId, fileNames, token),
-  },
-  pendingUploads: {
-    getSessions: () => ipcRenderer.invoke('upload:getPendingSessions'),
-    dismissSession: (sessionId) => ipcRenderer.invoke('upload:dismissPendingSession', sessionId),
-    clearAll: () => ipcRenderer.invoke('upload:clearPendingSessions'),
   },
 };
 

@@ -10,12 +10,6 @@ import path from 'path';
 import fs from 'fs';
 import Store from 'electron-store';
 import { UploadManager, UploadSessionInfo } from './uploadManager';
-import {
-  loadPendingSessions,
-  removePendingSession,
-  clearAllPendingSessions,
-  PendingSession,
-} from './uploadPersistence';
 
 // File-based logging for debugging
 const LOG_FILE = path.join(require("os").homedir(), "pix-uploader-debug.log");
@@ -78,8 +72,6 @@ interface StoreSchema {
 }
 
 const store = new Store<StoreSchema>({
-  name: 'session',          // saved to userData/session.json — stable across versions
-  clearInvalidConfig: false, // never wipe session data on schema mismatch
   defaults: {
     session: null,
   },
@@ -117,13 +109,10 @@ const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 480,
-    height: 540,
-    minWidth: 480,
-    minHeight: 540,
-    maxWidth: 480,
-    maxHeight: 540,
-    resizable: false,
+    width: 900,
+    height: 700,
+    minWidth: 700,
+    minHeight: 500,
     backgroundColor: '#0f0f0f',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 15, y: 10 },
@@ -314,11 +303,13 @@ function getUploadManager(): UploadManager {
       onSessionComplete: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionComplete', session);
         // Show notification
-        const msg = session.failedFiles > 0
-          ? `${session.completedFiles} מתוך ${session.totalFiles} תמונות הועלו בהצלחה`
-          : `${session.completedFiles} תמונות הועלו בהצלחה`;
+        const msg = session.errorMessage
+          ? session.errorMessage
+          : session.failedFiles > 0
+            ? `${session.completedFiles} מתוך ${session.totalFiles} תמונות הועלו בהצלחה`
+            : `${session.completedFiles} תמונות הועלו בהצלחה`;
         new Notification({
-          title: `${session.galleryName} – ההעלאה הסתיימה`,
+          title: session.errorMessage ? 'חריגה ממכסת אחסון' : `${session.galleryName} – ההעלאה הסתיימה`,
           body: msg,
         }).show();
       },
