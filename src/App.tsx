@@ -154,6 +154,7 @@ export default function App() {
         speed: session.speed,
         eta: session.eta,
         status: session.status,
+        errorMessage: session.errorMessage,
       };
 
       const channel = getOrCreateChannel(session.galleryId);
