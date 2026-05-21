@@ -1,13 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import LoginScreen from './screens/LoginScreen';
 import GallerySelectScreen from './screens/GallerySelectScreen';
-import FolderSelectScreen from './screens/FolderSelectScreen';
+import FolderSelectScreen, { type FolderItem } from './screens/FolderSelectScreen';
 import UploadScreen from './screens/UploadScreen';
-import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.1';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -36,14 +35,10 @@ export default function App() {
   const [galleryKey, setGalleryKey] = useState(0);
   const [folderKey, setFolderKey] = useState(0);
   const [uploadSessions, setUploadSessions] = useState<UploadSessionInfo[]>([]);
+  const [cachedFolders, setCachedFolders] = useState<FolderItem[]>([]);
+  // pendingSessions/resumingSession removed — auto-resume handles this silently
   const pendingDeepLinkRef = useRef<any>(null);
   const [screenTransition, setScreenTransition] = useState(false);
-  const [toastNotifications, setToastNotifications] = useState<Array<{
-    id: string;
-    folderName: string;
-    galleryName: string;
-    count: number;
-  }>>([]);
 
   // Screen transition helper
   const navigateTo = useCallback((nextScreen: Screen) => {
@@ -53,6 +48,52 @@ export default function App() {
       setScreenTransition(false);
     }, 150);
   }, []);
+
+  // Auto-resume pending (interrupted) sessions when user is authenticated — no prompt
+  const autoResumeAllRef = useRef(false);
+  const autoResumeAll = useCallback(async (token: string) => {
+    if (!window.electronAPI) return;
+    if (typeof window.electronAPI.upload.getPendingSessions !== 'function') return;
+    try {
+      const sessions = await window.electronAPI.upload.getPendingSessions();
+      if (!sessions || sessions.length === 0) return;
+      console.log(`[Resume] Auto-resuming ${sessions.length} interrupted session(s)`);
+      for (const s of sessions) {
+        try {
+          const result = await window.electronAPI.upload.resumePendingSession(s.sessionId, token);
+          if (!result.resumed) {
+            await window.electronAPI.upload.dismissPendingSession(s.sessionId);
+            console.log(`[Resume] Session ${s.sessionId} discarded: ${result.reason}`);
+          } else {
+            console.log(`[Resume] Session ${s.sessionId} resumed with ${result.remainingCount} files`);
+          }
+        } catch (err) {
+          console.error('[Resume] Error resuming session:', err);
+        }
+      }
+    } catch (err) {
+      console.error('[Resume] getPendingSessions error:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!auth) return;
+    autoResumeAllRef.current = false;
+    // Slight delay to let the upload manager initialise
+    const t = setTimeout(() => autoResumeAll(auth.token), 1500);
+    return () => clearTimeout(t);
+  }, [auth, autoResumeAll]);
+
+  // Auto-resume when network comes back online (only if user hasn't manually stopped)
+  useEffect(() => {
+    if (!auth) return;
+    const handleOnline = () => {
+      console.log('[Network] Back online — auto-resuming pending sessions');
+      autoResumeAll(auth.token);
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [auth, autoResumeAll]);
 
   // Restore session on mount
   useEffect(() => {
@@ -190,19 +231,7 @@ export default function App() {
       });
       broadcastProgress(session);
 
-      // Toast notification on successful completion
-      if (session.status === 'done' && session.failedFiles === 0) {
-        const toastId = session.sessionId;
-        setToastNotifications((prev) => [
-          ...prev.filter((t) => t.id !== toastId),
-          {
-            id: toastId,
-            folderName: session.folderName || 'תיקייה',
-            galleryName: session.galleryName || 'גלריה',
-            count: session.completedFiles,
-          },
-        ]);
-      }
+
     });
 
     return () => {
@@ -312,13 +341,19 @@ export default function App() {
     setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });
 
     if (payload.folderId) {
-      setFolder({ id: payload.folderId, name: payload.folderName || 'תיקייה' });
+      const rawFolderId = String(payload.folderId || '').trim();
+      const normalizedFolderId = rawFolderId && rawFolderId.includes('-folder-')
+        ? rawFolderId
+        : `${payload.galleryId}-folder-${rawFolderId}`;
+
+      setFolder({ id: normalizedFolderId, name: payload.folderName || 'תיקייה' });
       setScreen('upload');
     } else {
       setFolder(null);
       setScreen('folders');
     }
   }, []);
+
 
   const handleLogin = useCallback((token: string, userId: string, email: string) => {
     setAuth({ token, userId, email });
@@ -353,26 +388,17 @@ export default function App() {
     setAuth(null);
     setGallery(null);
     setFolder(null);
-    setToastNotifications([]);
     navigateTo('login');
   }, [navigateTo]);
 
   const handleBackToGalleries = useCallback(() => {
     setGallery(null);
     setFolder(null);
+    setCachedFolders([]);
     setGalleryKey((k) => k + 1);
     navigateTo('galleries');
   }, [navigateTo]);
 
-  const handleCancelSession = useCallback((sessionId: string) => {
-    window.electronAPI.upload.cancelSession(sessionId);
-    setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
-  }, []);
-
-  const handleDismissSession = useCallback((sessionId: string) => {
-    window.electronAPI.upload.dismissSession(sessionId);
-    setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
-  }, []);
 
   if (loading) {
     return (
@@ -392,33 +418,9 @@ export default function App() {
     <div className="flex flex-col h-screen">
       {/* macOS traffic light drag region */}
       <div className="h-9 flex-shrink-0" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
-      {/* Toast notifications */}
-      {toastNotifications.length > 0 && (
-        <div className="fixed top-14 right-3 z-50 flex flex-col gap-2 pointer-events-none">
-          {toastNotifications.map((toast) => (
-            <div
-              key={toast.id}
-              className="pointer-events-auto flex items-start gap-3 bg-white border border-gray-200 rounded-xl shadow-lg px-4 py-3 min-w-[240px] max-w-[300px] animate-slide-in"
-            >
-              <span className="text-xl mt-0.5">✅</span>
-              <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-gray-900 leading-tight">העלאה הושלמה!</p>
-                <p className="text-xs text-gray-500 mt-0.5 leading-snug">
-                  {toast.count} תמונות הועלו לתיקייה <span className="font-medium text-gray-700">{toast.folderName}</span>
-                </p>
-              </div>
-              <button
-                onClick={() => setToastNotifications((prev) => prev.filter((t) => t.id !== toast.id))}
-                className="text-gray-400 hover:text-gray-600 transition-colors mt-0.5 flex-shrink-0"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                  <path d="M18 6L6 18M6 6l12 12"/>
-                </svg>
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+
+
+      {/* Pending sessions are auto-resumed silently on load/reconnect */}
 
       {/* Main content area with transition */}
       <div
@@ -446,6 +448,9 @@ export default function App() {
             userId={auth.userId}
             onSelectFolder={handleSelectFolder}
             onBack={handleBackToGalleries}
+            uploadSessions={uploadSessions}
+            initialFolders={cachedFolders.length > 0 ? cachedFolders : undefined}
+            onFoldersLoaded={setCachedFolders}
           />
         )}
         {screen === 'upload' && auth && gallery && folder && (
@@ -461,14 +466,7 @@ export default function App() {
         )}
       </div>
 
-      {/* Persistent upload status bar */}
-      {screen !== 'login' && uploadSessions.length > 0 && (
-        <UploadStatusBar
-          sessions={uploadSessions}
-          onCancel={handleCancelSession}
-          onDismiss={handleDismissSession}
-        />
-      )}
+
 
       {/* Version number */}
       <div className="fixed bottom-2 left-2 text-[10px] text-black/30 select-none pointer-events-none">

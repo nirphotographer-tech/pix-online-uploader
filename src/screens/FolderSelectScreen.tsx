@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
+import type { UploadSessionInfo } from '../../electron/preload';
 
-interface Folder {
+export interface FolderItem {
   id: string;
   name: string;
   gallery_id: string;
@@ -18,6 +19,9 @@ interface FolderSelectScreenProps {
   userId: string;
   onSelectFolder: (folderId: string, folderName: string) => void;
   onBack: () => void;
+  uploadSessions?: UploadSessionInfo[];
+  initialFolders?: FolderItem[];
+  onFoldersLoaded?: (folders: FolderItem[]) => void;
 }
 
 export default function FolderSelectScreen({
@@ -27,15 +31,17 @@ export default function FolderSelectScreen({
   userId,
   onSelectFolder,
   onBack,
+  uploadSessions = [],
+  initialFolders,
+  onFoldersLoaded,
 }: FolderSelectScreenProps) {
-  const [folders, setFolders] = useState<Folder[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [folders, setFolders] = useState<FolderItem[]>(initialFolders ?? []);
+  const [loading, setLoading] = useState(!initialFolders || initialFolders.length === 0);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creating, setCreating] = useState(false);
-  const [autoSkipped, setAutoSkipped] = useState(false);
 
   const ensureDefaultFolder = useCallback(
     async () => {
@@ -74,9 +80,9 @@ export default function FolderSelectScreen({
 
         if (fetchError) throw new Error(fetchError.message);
 
-        const foldersWithCounts: Folder[] = [];
+        const foldersWithCounts: FolderItem[] = [];
         if (data && data.length > 0) {
-          const countPromises = data.map(async (folder: Folder) => {
+          const countPromises = data.map(async (folder: FolderItem) => {
             const { count, error: countError } = await supabase
               .from('gallery_photos')
               .select('*', { count: 'exact', head: true })
@@ -96,20 +102,13 @@ export default function FolderSelectScreen({
             .order('folder_index', { ascending: true });
           if (newData && newData.length > 0) {
             foldersWithCounts.push(
-              ...newData.map((f: Folder) => ({ ...f, photo_count: f.photo_count || 0 }))
+              ...newData.map((f: FolderItem) => ({ ...f, photo_count: f.photo_count || 0 }))
             );
           }
         }
 
         setFolders(foldersWithCounts);
-
-        // Auto-skip: if only one folder (default), go straight to upload
-        if (!isRefresh && !autoSkipped && foldersWithCounts.length === 1) {
-          setAutoSkipped(true);
-          const single = foldersWithCounts[0];
-          onSelectFolder(single.id, 'כל הגלריה');
-          return;
-        }
+        onFoldersLoaded?.(foldersWithCounts);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'שגיאה בטעינת התיקיות');
       } finally {
@@ -117,7 +116,7 @@ export default function FolderSelectScreen({
         setRefreshing(false);
       }
     },
-    [galleryId, ensureDefaultFolder, autoSkipped, onSelectFolder]
+    [galleryId, ensureDefaultFolder]
   );
 
   useEffect(() => {
@@ -162,10 +161,21 @@ export default function FolderSelectScreen({
     }
   };
 
+  // Get upload status for a specific folder
+  const getFolderUploadStatus = (folderId: string) => {
+    const sessions = uploadSessions.filter((s) => s.folderId === folderId);
+    if (sessions.length === 0) return null;
+    // Prefer uploading session over done
+    const uploading = sessions.find((s) => s.status === 'uploading');
+    if (uploading) return uploading;
+    const done = sessions.find((s) => s.status === 'done');
+    if (done) return done;
+    return sessions[sessions.length - 1];
+  };
+
   const totalPhotos = folders.reduce((sum, f) => sum + f.photo_count, 0);
 
-  // Show loading during auto-skip too
-  if (loading || (autoSkipped && folders.length <= 1)) {
+  if (loading) {
     return (
       <div className="flex flex-col h-full overflow-hidden bg-dark-bg">
         <div className="flex items-center justify-center flex-1">
@@ -217,8 +227,7 @@ export default function FolderSelectScreen({
             </button>
             <button
               onClick={() => setShowNewFolder(true)}
-              className="h-8 px-3 bg-brand-primary hover:bg-brand-hover text-white text-xs
-                         font-medium rounded-lg transition-colors flex items-center gap-1.5"
+              className="h-8 px-3 bg-brand-primary hover:bg-brand-hover text-white text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5"
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
@@ -244,15 +253,12 @@ export default function FolderSelectScreen({
               placeholder="שם התיקייה..."
               autoFocus
               disabled={creating}
-              className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg
-                         text-gray-900 text-sm placeholder-gray-400 outline-none
-                         focus:border-brand-primary/50 transition-colors disabled:opacity-50"
+              className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-900 text-sm placeholder-gray-400 outline-none focus:border-brand-primary/50 transition-colors disabled:opacity-50"
             />
             <button
               onClick={handleCreateFolder}
               disabled={creating || !newFolderName.trim()}
-              className="px-4 py-2 bg-brand-primary hover:bg-brand-hover text-white text-sm
-                         rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-4 py-2 bg-brand-primary hover:bg-brand-hover text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {creating ? 'יוצר...' : 'צור'}
             </button>
@@ -278,80 +284,88 @@ export default function FolderSelectScreen({
           </div>
         ) : (
           <div className="space-y-2">
-            {/* Upload to full gallery — hero card */}
-            <button
-              onClick={() => {
-                const def = folders.find((f) => f.is_default) || folders[0];
-                if (def) onSelectFolder(def.id, 'כל הגלריה');
-              }}
-              className="w-full group relative overflow-hidden rounded-xl border border-brand-primary/20 bg-gradient-to-l from-brand-primary/5 via-dark-card to-dark-card
-                         hover:border-brand-primary/40 hover:from-brand-primary/10 transition-all duration-300 text-right"
-            >
-              <div className="flex items-center gap-4 p-4">
-                <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-brand-primary/20 to-brand-primary/5 flex items-center justify-center flex-shrink-0
-                               group-hover:from-brand-primary/30 group-hover:to-brand-primary/10 transition-all duration-300">
-                  <svg className="w-5 h-5 text-brand-primary" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                      d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                  </svg>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-semibold text-gray-900 group-hover:text-brand-hover transition-colors">
-                    העלאה לכל הגלריה
-                  </h3>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {totalPhotos > 0 ? `${totalPhotos} תמונות בגלריה` : 'התחילו להעלות תמונות'}
-                  </p>
-                </div>
-                <div className="w-8 h-8 rounded-lg bg-brand-primary/10 flex items-center justify-center flex-shrink-0
-                               group-hover:bg-brand-primary/20 transition-all">
-                  <svg className="w-4 h-4 text-brand-primary rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                  </svg>
-                </div>
-              </div>
-            </button>
+            {folders.map((folder) => {
+              const uploadStatus = getFolderUploadStatus(folder.id);
+              const isUploading = uploadStatus?.status === 'uploading';
+              const isDone = uploadStatus?.status === 'done';
+              const isActive = isUploading || isDone;
 
-            {/* Divider */}
-            {folders.length > 1 && (
-              <div className="flex items-center gap-3 py-2 px-1">
-                <div className="flex-1 h-px bg-dark-border" />
-                <span className="text-[11px] text-gray-600 font-medium">או בחרו תיקייה</span>
-                <div className="flex-1 h-px bg-dark-border" />
-              </div>
-            )}
+              return (
+                <button
+                  key={folder.id}
+                  onClick={() => onSelectFolder(folder.id, folder.name)}
+                  className={`w-full group flex items-center gap-4 p-3.5 border rounded-xl transition-all duration-200 text-right ${
+                    isActive
+                      ? 'bg-emerald-50 border-emerald-300 hover:border-emerald-400 hover:bg-emerald-100'
+                      : 'bg-dark-card border-dark-border hover:border-brand-primary/30 hover:bg-dark-hover'
+                  }`}
+                >
+                  {/* Folder icon */}
+                  <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors ${
+                    isActive ? 'bg-emerald-100' : 'bg-dark-bg group-hover:bg-brand-primary/10'
+                  }`}>
+                    {isUploading ? (
+                      <svg className="w-4 h-4 text-emerald-600 animate-spin" viewBox="0 0 24 24" fill="none">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                      </svg>
+                    ) : isDone ? (
+                      <svg className="w-4 h-4 text-emerald-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : (
+                      <svg className="w-4.5 h-4.5 text-gray-500 group-hover:text-brand-primary transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
+                          d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                      </svg>
+                    )}
+                  </div>
 
-            {/* Individual folders (skip default if it's redundant with the hero card) */}
-            {folders
-              .filter((f) => folders.length > 1 ? !f.is_default : false)
-              .map((folder) => (
-              <button
-                key={folder.id}
-                onClick={() => onSelectFolder(folder.id, folder.name)}
-                className="w-full group flex items-center gap-4 p-3.5 bg-dark-card border border-dark-border
-                           rounded-xl hover:border-brand-primary/30 hover:bg-dark-hover transition-all duration-200 text-right"
-              >
-                <div className="w-9 h-9 rounded-lg bg-dark-bg flex items-center justify-center flex-shrink-0
-                               group-hover:bg-brand-primary/10 transition-colors">
-                  <svg className="w-4.5 h-4.5 text-gray-500 group-hover:text-brand-primary transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                      d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                  </svg>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <h3 className="text-sm font-medium text-gray-900 group-hover:text-brand-hover transition-colors truncate">
-                    {folder.name}
-                  </h3>
-                  <p className="text-xs text-gray-600 mt-0.5">
-                    {folder.photo_count > 0 ? `${folder.photo_count} תמונות` : 'ריקה'}
-                  </p>
-                </div>
-                <svg className="w-4 h-4 text-gray-700 group-hover:text-brand-primary transition-colors flex-shrink-0 rotate-180"
-                  fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </button>
-            ))}
+                  {/* Text */}
+                  <div className="flex-1 min-w-0">
+                    <h3 className={`text-sm font-medium truncate transition-colors ${
+                      isActive ? 'text-emerald-800' : 'text-gray-900 group-hover:text-brand-hover'
+                    }`}>
+                      {folder.name}
+                    </h3>
+                    <p className={`text-xs mt-0.5 ${isActive ? 'text-emerald-600' : 'text-gray-600'}`}>
+                      {isUploading
+                        ? `מעלה... ${uploadStatus.completedFiles}/${uploadStatus.totalFiles} תמונות (${uploadStatus.percentage}%)`
+                        : isDone
+                        ? `✓ ${uploadStatus.completedFiles} תמונות הועלו`
+                        : folder.photo_count > 0
+                        ? `${folder.photo_count} תמונות`
+                        : 'ריקה'}
+                    </p>
+                  </div>
+
+                  {/* Progress bar for uploading */}
+                  {isUploading && (
+                    <div className="w-16 flex-shrink-0">
+                      <div className="h-1.5 bg-emerald-200 rounded-full overflow-hidden">
+                        <div
+                          className="h-full bg-emerald-500 rounded-full transition-all duration-300"
+                          style={{ width: `${uploadStatus.percentage}%` }}
+                        />
+                      </div>
+                      <p className="text-[10px] text-emerald-600 text-center mt-0.5">{uploadStatus.percentage}%</p>
+                    </div>
+                  )}
+
+                  {/* Arrow */}
+                  {!isUploading && (
+                    <svg
+                      className={`w-4 h-4 flex-shrink-0 rotate-180 transition-colors ${
+                        isDone ? 'text-emerald-500' : 'text-gray-700 group-hover:text-brand-primary'
+                      }`}
+                      fill="none" viewBox="0 0 24 24" stroke="currentColor"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>

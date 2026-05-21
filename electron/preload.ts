@@ -33,6 +33,17 @@ export interface DeepLinkPayload {
   folderName: string;
 }
 
+export interface PersistedSessionInfo {
+  sessionId: string;
+  galleryId: string;
+  galleryName: string;
+  folderId: string;
+  folderName: string;
+  totalFiles: number;
+  completedFileNames: string[];
+  startedAt: number;
+}
+
 export interface ElectronAPI {
   store: {
     getSession: () => Promise<{
@@ -74,6 +85,9 @@ export interface ElectronAPI {
     dismissSession: (sessionId: string) => Promise<void>;
     getSessions: () => Promise<UploadSessionInfo[]>;
     hasActiveSessions: () => Promise<boolean>;
+    getPendingSessions: () => Promise<PersistedSessionInfo[]>;
+    dismissPendingSession: (sessionId: string) => Promise<void>;
+    resumePendingSession: (sessionId: string, token: string) => Promise<{ resumed: boolean; newSessionId?: string; remainingCount?: number; reason?: string }>;
     onSessionUpdate: (callback: (session: UploadSessionInfo) => void) => () => void;
     onSessionComplete: (callback: (session: UploadSessionInfo) => void) => () => void;
     onAllSessionsComplete: (callback: () => void) => () => void;
@@ -131,6 +145,9 @@ const electronAPI: ElectronAPI = {
     dismissSession: (sessionId) => ipcRenderer.invoke('upload:dismissSession', sessionId),
     getSessions: () => ipcRenderer.invoke('upload:getSessions'),
     hasActiveSessions: () => ipcRenderer.invoke('upload:hasActiveSessions'),
+    getPendingSessions: () => ipcRenderer.invoke('upload:getPendingSessions'),
+    dismissPendingSession: (sessionId) => ipcRenderer.invoke('upload:dismissPendingSession', sessionId),
+    resumePendingSession: (sessionId, token) => ipcRenderer.invoke('upload:resumePendingSession', sessionId, token),
     onSessionUpdate: (callback) => {
       const handler = (_event: Electron.IpcRendererEvent, session: UploadSessionInfo) =>
         callback(session);

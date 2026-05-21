@@ -10,6 +10,15 @@ import path from 'path';
 import fs from 'fs';
 import Store from 'electron-store';
 import { UploadManager, UploadSessionInfo } from './uploadManager';
+import {
+  saveSession,
+  markFileCompleted,
+  removeSession as removePersistSession,
+  loadPendingSessions,
+  getRemainingFiles,
+  clearAllSessions,
+  PersistedFile,
+} from './uploadPersistence';
 
 // File-based logging for debugging
 const LOG_FILE = path.join(require("os").homedir(), "pix-uploader-debug.log");
@@ -131,6 +140,25 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
+
+  // Capture renderer errors for debugging
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    fileLog(`[RENDERER] did-fail-load: code=${errorCode} desc=${errorDescription} url=${validatedURL}`);
+  });
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    fileLog(`[RENDERER] render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) { // warn/error only
+      fileLog(`[RENDERER CONSOLE] level=${level} line=${line} src=${sourceId}: ${message}`);
+    }
+  });
+  mainWindow.webContents.on('did-finish-load', () => {
+    fileLog('[RENDERER] did-finish-load ✓');
+  });
+  mainWindow.webContents.on('dom-ready', () => {
+    fileLog('[RENDERER] dom-ready ✓');
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -302,6 +330,8 @@ function getUploadManager(): UploadManager {
       },
       onSessionComplete: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionComplete', session);
+        // Remove from persistence — session finished
+        removePersistSession(session.sessionId);
         // Show notification
         const msg = session.errorMessage
           ? session.errorMessage
@@ -365,13 +395,20 @@ ipcMain.handle(
       galleryName,
       folderId,
       folderName,
-      token
+      token,
+      // per-file completion callback for persistence
+      (fileName: string) => markFileCompleted(sessionId, fileName)
     );
+
+    // Persist session to disk so it can be resumed after restart
+    saveSession(sessionId, galleryId, galleryName, folderId, folderName, resolvedFiles as PersistedFile[]);
   }
 );
 
 ipcMain.handle('upload:cancelSession', (_event, sessionId: string) => {
   uploadManager?.cancelSession(sessionId);
+  // Remove from persistence — user explicitly stopped this upload
+  removePersistSession(sessionId);
 });
 
 ipcMain.handle('upload:dismissSession', (_event, sessionId: string) => {
@@ -447,19 +484,78 @@ ipcMain.handle(
   }
 );
 
-// ── Pending sessions IPC ──
+// ── Pending sessions IPC (resume after restart) ──
 
-/** Renderer requests the list of sessions interrupted by a previous quit */
-ipcMain.handle('upload:getPendingSessions', (): PendingSession[] => {
+ipcMain.handle('upload:getPendingSessions', () => {
   return loadPendingSessions();
 });
 
-/** Renderer dismisses a pending session (user chose not to resume it) */
 ipcMain.handle('upload:dismissPendingSession', (_event, sessionId: string) => {
-  removePendingSession(sessionId);
+  removePersistSession(sessionId);
 });
 
-/** Renderer requests to clear all pending sessions (e.g. on logout) */
 ipcMain.handle('upload:clearPendingSessions', () => {
-  clearAllPendingSessions();
+  clearAllSessions();
 });
+
+ipcMain.handle(
+  'upload:resumePendingSession',
+  async (
+    _event,
+    sessionId: string,
+    token: string
+  ) => {
+    const remaining = getRemainingFiles(sessionId);
+    if (remaining.length === 0) {
+      removePersistSession(sessionId);
+      return { resumed: false, reason: 'no_remaining_files' };
+    }
+
+    // Check which files still exist on disk
+    const existingFiles = remaining.filter((f) => {
+      try { fs.statSync(f.path); return true; } catch { return false; }
+    });
+
+    if (existingFiles.length === 0) {
+      removePersistSession(sessionId);
+      return { resumed: false, reason: 'files_not_found' };
+    }
+
+    // Prevent sleep while uploading
+    if (powerSaveId === null) {
+      powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
+    }
+
+    const manager = getUploadManager();
+    // Use a new session ID so it shows as a fresh session in the UI
+    const newSessionId = `resume-${Date.now()}`;
+
+    // Get gallery/folder info from persisted session
+    const sessions = loadPendingSessions();
+    const persisted = sessions.find((s) => s.sessionId === sessionId);
+    if (!persisted) return { resumed: false, reason: 'session_not_found' };
+
+    const alreadyCompleted = persisted.completedFileNames.length;
+    const originalTotal = persisted.totalFiles;
+
+    manager.startSession(
+      newSessionId,
+      existingFiles,
+      persisted.galleryId,
+      persisted.galleryName,
+      persisted.folderId,
+      persisted.folderName,
+      token,
+      (fileName: string) => markFileCompleted(newSessionId, fileName),
+      alreadyCompleted,
+      originalTotal
+    );
+
+    // Save new session, remove old one
+    saveSession(newSessionId, persisted.galleryId, persisted.galleryName, persisted.folderId, persisted.folderName, existingFiles as PersistedFile[]);
+    removePersistSession(sessionId);
+
+    console.log(`[Resume] Resumed session ${sessionId} → ${newSessionId} with ${existingFiles.length} files`);
+    return { resumed: true, newSessionId, remainingCount: existingFiles.length };
+  }
+);
