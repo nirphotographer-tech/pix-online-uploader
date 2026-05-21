@@ -527,13 +527,29 @@ ipcMain.handle(
     }
 
     const manager = getUploadManager();
-    // Use a new session ID so it shows as a fresh session in the UI
-    const newSessionId = `resume-${Date.now()}`;
 
-    // Get gallery/folder info from persisted session
+    // Get gallery/folder info from persisted session first (needed for duplicate check)
     const sessions = loadPendingSessions();
     const persisted = sessions.find((s) => s.sessionId === sessionId);
     if (!persisted) return { resumed: false, reason: 'session_not_found' };
+
+    // ⚠️ Anti-double-upload guard: if the same folder is already uploading in
+    // memory (e.g. this was triggered by the 'online' event while retries are
+    // still running), skip — the in-memory queue will recover on its own now
+    // that the network is back (waitForNetwork in uploadQueue).
+    const activeSessions = manager.getAllSessions();
+    const folderAlreadyActive = activeSessions.some(
+      (s) => s.folderId === persisted.folderId &&
+              s.galleryId === persisted.galleryId &&
+              s.status === 'uploading'
+    );
+    if (folderAlreadyActive) {
+      console.log(`[Resume] Skipping resume for ${sessionId} — folder ${persisted.folderId} already uploading in memory`);
+      return { resumed: false, reason: 'already_running' };
+    }
+
+    // Use a new session ID so it shows as a fresh session in the UI
+    const newSessionId = `resume-${Date.now()}`;
 
     const alreadyCompleted = persisted.completedFileNames.length;
     const originalTotal = persisted.totalFiles;

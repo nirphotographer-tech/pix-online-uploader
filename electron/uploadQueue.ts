@@ -1,5 +1,6 @@
 import fs from 'fs';
 import sizeOf from 'image-size';
+import { net } from 'electron';
 
 // ============================================================================
 // Types
@@ -502,8 +503,33 @@ export class UploadQueue {
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
         
+        // ---- Network-offline detection ----
+        // If the device is offline at the time of failure, wait for connection
+        // to return WITHOUT consuming a retry attempt. This means an upload can
+        // survive an arbitrarily long network outage.
+        const isOffline = !net.isOnline();
+        const errMsg = lastError.message;
+        const looksLikeNetworkError =
+          isOffline ||
+          errMsg.includes('Failed to fetch') ||
+          errMsg.includes('NetworkError') ||
+          errMsg.includes('ERR_INTERNET_DISCONNECTED') ||
+          errMsg.includes('ERR_NETWORK_CHANGED') ||
+          errMsg.includes('ECONNREFUSED') ||
+          errMsg.includes('ENOTFOUND');
+
+        if (looksLikeNetworkError && !this.isCancelled) {
+          console.log(`[Upload] 🌐 Network error for ${file.name} — waiting for reconnect (attempt ${attempt}/${MAX_RETRIES} preserved)`);
+          await this.waitForNetwork();
+          if (this.isCancelled) break;
+          await this.sleep(2000); // brief grace period after reconnect
+          attempt--; // Don't charge this attempt — the for-loop will re-increment
+          file.status = 'uploading';
+          continue;
+        }
+
         // If we got a 401 Unauthorized, refresh the token before next retry
-        const is401 = lastError.message.includes('HTTP 401') || lastError.message.includes('Unauthorized');
+        const is401 = errMsg.includes('HTTP 401') || errMsg.includes('Unauthorized');
         if (is401 && attempt < MAX_RETRIES) {
           console.log(`[Upload] 🔑 Got 401 for ${file.name}, refreshing token...`);
           await this.refreshToken();
@@ -512,7 +538,7 @@ export class UploadQueue {
         // Mark as uploading again for retry
         file.status = 'uploading';
         
-        const isAbort = lastError.name === 'AbortError' || lastError.message.includes('abort');
+        const isAbort = lastError.name === 'AbortError' || errMsg.includes('abort');
         const label = isAbort ? 'TIMEOUT' : 'ERROR';
         console.error(`[Upload] ❌ [${attempt}/${MAX_RETRIES}] ${label} for ${file.name}: ${lastError.message}`);
       }
@@ -704,5 +730,26 @@ export class UploadQueue {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
+   * Wait until the network is back online (using Electron's net.isOnline()).
+   * Returns immediately if already online. Checks every 3 seconds.
+   * Also returns if the queue is cancelled (to avoid hanging forever).
+   */
+  private waitForNetwork(): Promise<void> {
+    if (net.isOnline()) return Promise.resolve();
+    console.log('[Upload] 🌐 Network offline — waiting for connection...');
+    return new Promise<void>((resolve) => {
+      const interval = setInterval(() => {
+        if (this.isCancelled || net.isOnline()) {
+          clearInterval(interval);
+          if (!this.isCancelled) {
+            console.log('[Upload] 🌐 Network restored — resuming upload');
+          }
+          resolve();
+        }
+      }, 3000);
+    });
   }
 }
