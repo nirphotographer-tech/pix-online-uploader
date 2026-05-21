@@ -383,16 +383,20 @@ export class UploadQueue {
     let presign: PresignResponse | null = null;
     let uploadedToR2 = false;
     let cachedFileBuffer: Buffer | null = null;
+    // Set to true after a network-wait so we skip the normal retry-delay on the
+    // next attempt (we already waited for the network; no need to double-sleep).
+    let skipNextRetryDelay = false;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (this.isCancelled) break;
 
       try {
-        if (attempt > 1) {
+        if (attempt > 1 && !skipNextRetryDelay) {
           const delay = RETRY_DELAYS[attempt - 2] || 30000;
           console.log(`[Upload] ⏳ Retry ${attempt}/${MAX_RETRIES} for ${file.name} (waiting ${delay}ms)`);
           await this.sleep(delay);
         }
+        skipNextRetryDelay = false;
 
         // ---- Step 1: Presign (skip if R2 upload already succeeded) ----
         if (!uploadedToR2) {
@@ -524,6 +528,7 @@ export class UploadQueue {
           if (this.isCancelled) break;
           await this.sleep(2000); // brief grace period after reconnect
           attempt--; // Don't charge this attempt — the for-loop will re-increment
+          skipNextRetryDelay = true; // We already waited; skip the normal retry-delay
           file.status = 'uploading';
           continue;
         }
