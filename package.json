@@ -1,6 +1,6 @@
 {
   "name": "pix-online-uploader",
-  "version": "2.5.2",
+  "version": "2.5.3",
   "description": "Desktop uploader for Pix Online photographers",
   "main": "dist-electron/main.js",
   "author": "Pix Online",

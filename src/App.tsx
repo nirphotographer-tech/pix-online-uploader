@@ -6,7 +6,7 @@ import UploadScreen from './screens/UploadScreen';
 import { supabase } from './lib/supabase';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.5.2';
+const APP_VERSION = '2.5.3';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
