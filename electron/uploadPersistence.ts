@@ -66,9 +66,14 @@ export function saveSession(
   galleryName: string,
   folderId: string,
   folderName: string,
-  files: PersistedFile[]
+  files: PersistedFile[],
+  options?: { preserveCompleted?: boolean; originalTotal?: number }
 ): void {
   const store = readStore();
+  const existing = store[sessionId];
+  const completedFileNames =
+    options?.preserveCompleted && existing ? existing.completedFileNames : [];
+  const totalFiles = options?.originalTotal ?? files.length;
   store[sessionId] = {
     sessionId,
     galleryId,
@@ -76,12 +81,12 @@ export function saveSession(
     folderId,
     folderName,
     files,
-    completedFileNames: [],
-    totalFiles: files.length,
-    startedAt: Date.now(),
+    completedFileNames,
+    totalFiles,
+    startedAt: existing?.startedAt ?? Date.now(),
   };
   writeStore(store);
-  console.log(`[Persistence] Saved session ${sessionId} (${files.length} files)`);
+  console.log(`[Persistence] Saved session ${sessionId} (${files.length} remaining, ${completedFileNames.length} already done, ${totalFiles} total)`);
 }
 
 /** Mark a file as completed so we don't re-upload it on resume */

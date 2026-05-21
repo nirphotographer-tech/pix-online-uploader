@@ -67,7 +67,14 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         data.session.user.email || email
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'שגיאה בהתחברות');
+      const msg = err instanceof Error ? err.message : 'שגיאה בהתחברות';
+      const isNetworkError =
+        msg.includes('Failed to fetch') ||
+        msg.includes('NetworkError') ||
+        msg.includes('fetch') ||
+        msg.includes('ENOTFOUND') ||
+        msg.includes('ERR_INTERNET_DISCONNECTED');
+      setError(isNetworkError ? 'אין חיבור לאינטרנט' : msg);
     } finally {
       setLoading(false);
     }

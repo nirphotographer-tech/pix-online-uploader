@@ -548,30 +548,28 @@ ipcMain.handle(
       return { resumed: false, reason: 'already_running' };
     }
 
-    // Use a new session ID so it shows as a fresh session in the UI
-    const newSessionId = `resume-${Date.now()}`;
-
+    // Keep the ORIGINAL sessionId so the website sees the same session
+    // continuing (same Realtime broadcast key) instead of a brand-new one.
     const alreadyCompleted = persisted.completedFileNames.length;
     const originalTotal = persisted.totalFiles;
 
     manager.startSession(
-      newSessionId,
+      sessionId,
       existingFiles,
       persisted.galleryId,
       persisted.galleryName,
       persisted.folderId,
       persisted.folderName,
       token,
-      (fileName: string) => markFileCompleted(newSessionId, fileName),
+      (fileName: string) => markFileCompleted(sessionId, fileName),
       alreadyCompleted,
       originalTotal
     );
 
-    // Save new session, remove old one
-    saveSession(newSessionId, persisted.galleryId, persisted.galleryName, persisted.folderId, persisted.folderName, existingFiles as PersistedFile[]);
-    removePersistSession(sessionId);
+    // Update persisted session — keep same sessionId, preserve completed list + original total
+    saveSession(sessionId, persisted.galleryId, persisted.galleryName, persisted.folderId, persisted.folderName, existingFiles as PersistedFile[], { preserveCompleted: true, originalTotal });
 
-    console.log(`[Resume] Resumed session ${sessionId} → ${newSessionId} with ${existingFiles.length} files`);
-    return { resumed: true, newSessionId, remainingCount: existingFiles.length };
+    console.log(`[Resume] Resumed session ${sessionId} with ${existingFiles.length} remaining files (${alreadyCompleted}/${originalTotal} already done)`);
+    return { resumed: true, newSessionId: sessionId, remainingCount: existingFiles.length };
   }
 );
