@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase';
 interface Gallery {
   id: string;
   name: string;
+  share_id?: string;
   created_at: string;
   updated_at: string;
   event_date?: string;
@@ -25,7 +26,7 @@ interface GalleryAllResponse {
 interface GallerySelectScreenProps {
   token: string;
   userId: string;
-  onSelectGallery: (galleryId: string, galleryName: string) => void;
+  onSelectGallery: (galleryId: string, galleryName: string, shareId?: string) => void;
   onLogout: () => void;
   email: string;
 }
@@ -83,7 +84,7 @@ export default function GallerySelectScreen({
         }),
         supabase
           .from('galleries')
-          .select('id, name, is_published, created_at, updated_at, user_id, cover_image, photo_count, event_date')
+          .select('id, name, share_id, is_published, created_at, updated_at, user_id, cover_image, photo_count, event_date')
           .eq('user_id', userId)
           .order('created_at', { ascending: false }),
       ]);
@@ -271,7 +272,7 @@ export default function GallerySelectScreen({
               return (
                 <button
                   key={gallery.id}
-                  onClick={() => onSelectGallery(gallery.id, gallery.name)}
+                  onClick={() => onSelectGallery(gallery.id, gallery.name, gallery.share_id)}
                   className="group w-full flex items-center justify-between px-4 py-3 bg-dark-card hover:bg-dark-hover transition-colors duration-100 border-r-2 border-transparent hover:border-brand-primary"
                 >
                   {/* ── Thumbnail + Info (grouped together) ── */}

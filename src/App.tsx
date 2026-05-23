@@ -4,6 +4,7 @@ import GallerySelectScreen from './screens/GallerySelectScreen';
 import FolderSelectScreen, { type FolderItem } from './screens/FolderSelectScreen';
 import UploadScreen from './screens/UploadScreen';
 import { supabase } from './lib/supabase';
+import { runGalleryFaceScan } from './lib/face-scan';
 import type { UploadSessionInfo } from '../electron/preload';
 
 const APP_VERSION = '2.5.3';
@@ -19,6 +20,7 @@ interface AuthState {
 interface GalleryState {
   id: string;
   name: string;
+  shareId?: string;
 }
 
 interface FolderState {
@@ -231,7 +233,38 @@ export default function App() {
       });
       broadcastProgress(session);
 
-
+      // Trigger background face scan after successful upload
+      if (session.status === 'done') {
+        (async () => {
+          try {
+            const galleryId = session.galleryId;
+            // Fetch share_id from Supabase
+            const { data: galleryRow } = await supabase
+              .from('galleries')
+              .select('share_id')
+              .eq('id', galleryId)
+              .maybeSingle();
+            if (!galleryRow?.share_id) {
+              console.warn('[face-scan] Missing share_id for gallery', galleryId.substring(0, 8));
+              return;
+            }
+            // Fetch all photos for this gallery
+            const { data: photoRows } = await supabase
+              .from('photos')
+              .select('id, url')
+              .eq('gallery_id', galleryId);
+            if (!photoRows?.length) return;
+            const photos = photoRows
+              .filter((p) => p.id && p.url)
+              .map((p) => ({ id: String(p.id), url: p.url as string }));
+            console.log(`[face-scan] 🚀 Triggering post-upload scan: ${photos.length} photos`);
+            // Force=true so new uploads are always included in the scan
+            await runGalleryFaceScan(galleryRow.share_id, photos, { force: true });
+          } catch (err) {
+            console.warn('[face-scan] Post-upload scan failed (non-blocking):', err);
+          }
+        })();
+      }
     });
 
     return () => {
@@ -360,8 +393,8 @@ export default function App() {
     navigateTo('galleries');
   }, [navigateTo]);
 
-  const handleSelectGallery = useCallback((galleryId: string, galleryName: string) => {
-    setGallery({ id: galleryId, name: galleryName });
+  const handleSelectGallery = useCallback((galleryId: string, galleryName: string, shareId?: string) => {
+    setGallery({ id: galleryId, name: galleryName, shareId });
     setFolder(null);
     navigateTo('folders');
   }, [navigateTo]);
