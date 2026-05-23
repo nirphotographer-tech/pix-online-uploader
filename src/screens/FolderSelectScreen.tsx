@@ -283,7 +283,7 @@ export default function FolderSelectScreen({
             </button>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {folders.map((folder) => {
               const uploadStatus = getFolderUploadStatus(folder.id);
               const isUploading = uploadStatus?.status === 'uploading';

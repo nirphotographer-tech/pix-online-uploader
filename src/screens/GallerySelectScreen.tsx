@@ -262,7 +262,7 @@ export default function GallerySelectScreen({
 
         {/* ── GALLERY LIST ──────────────────────────────────── */}
         {!loading && !error && filteredGalleries.length > 0 && (
-          <div className="divide-y divide-dark-border">
+          <div className="flex flex-col gap-2 p-2">
             {filteredGalleries.map((gallery) => {
               const photoCount = photoCounts[gallery.id] ?? gallery.photo_count ?? 0;
               const displayDate = formatDate(gallery.event_date || gallery.created_at);
@@ -297,16 +297,6 @@ export default function GallerySelectScreen({
                     {/* Name + Date — directly next to thumbnail */}
                     <div className="min-w-0 text-right">
                       <div className="flex items-center gap-1.5 justify-end">
-                        {gallery.is_published === false && (
-                          <span className="flex-shrink-0 text-[10px] px-1.5 py-0.5 bg-amber-500/15 text-amber-400 font-medium leading-none">
-                            טיוטה
-                          </span>
-                        )}
-                        {gallery.is_published === true && (
-                          <span className="flex-shrink-0 text-[10px] px-1.5 py-0.5 bg-emerald-500/15 text-emerald-400 font-medium leading-none">
-                            פורסמה
-                          </span>
-                        )}
                         <h3 className="text-[14px] font-semibold text-gray-900 group-hover:text-brand-hover transition-colors truncate leading-tight">
                           {gallery.name}
                         </h3>
@@ -329,6 +319,12 @@ export default function GallerySelectScreen({
                         {photoCount}
                       </span>
                       <span className="text-[10px] text-gray-600 mt-0.5">תמונות</span>
+                      {gallery.is_published === false && (
+                        <span className="mt-1 text-[9px] px-1.5 py-0.5 bg-amber-500/15 text-amber-500 font-medium leading-none rounded-sm">טיוטה</span>
+                      )}
+                      {gallery.is_published === true && (
+                        <span className="mt-1 text-[9px] px-1.5 py-0.5 bg-emerald-500/15 text-emerald-500 font-medium leading-none rounded-sm">פורסמה</span>
+                      )}
                     </div>
                     <svg className="w-4 h-4 text-gray-700 group-hover:text-brand-primary transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
