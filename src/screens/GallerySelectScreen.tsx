@@ -277,12 +277,12 @@ export default function GallerySelectScreen({
                   {/* ── Thumbnail + Info (grouped together) ── */}
                   <div className="flex items-center gap-3 min-w-0 flex-1">
                     {/* Thumbnail */}
-                    <div className="w-14 flex-shrink-0 bg-[#111] overflow-hidden flex items-center justify-center">
+                    <div className="w-14 h-14 flex-shrink-0 bg-[#111] overflow-hidden flex items-center justify-center">
                       {coverUrl ? (
                         <img
                           src={coverUrl}
                           alt={gallery.name}
-                          className="w-full h-auto object-contain max-h-14"
+                          className="w-full h-full object-cover"
                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
                         />
                       ) : (
