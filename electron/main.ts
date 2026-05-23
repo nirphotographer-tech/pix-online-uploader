@@ -296,6 +296,13 @@ ipcMain.handle('dialog:openFolder', async () => {
   return imagePaths.map(getFileInfo);
 });
 
+ipcMain.handle('dialog:resolveDroppedFiles', (_event, filePaths: string[]) => {
+  const imageExts = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif', '.heic', '.heif']);
+  return filePaths
+    .filter((p) => imageExts.has(path.extname(p).toLowerCase()))
+    .map(getFileInfo);
+});
+
 // Power save blocker
 ipcMain.handle('power:preventSleep', () => {
   if (powerSaveId === null) {

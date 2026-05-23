@@ -239,21 +239,32 @@ export default function UploadScreen({
     e.preventDefault();
   };
 
-  const handleDrop = (e: React.DragEvent) => {
+  const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     dragCounter.current = 0;
     setIsDragging(false);
 
-    const droppedFiles = Array.from(e.dataTransfer.files) as Array<File & { path: string }>;
-    const { accepted, rejected } = processFiles(droppedFiles);
+    // In Electron, resolve file paths through main process for reliable filesystem access
+    const rawFiles = Array.from(e.dataTransfer.files) as Array<File & { path?: string }>;
+    const filePaths = rawFiles.map((f) => f.path).filter((p): p is string => !!p);
 
-    if (rejected) {
-      setRejectedFiles(rejected);
+    let fileInfos: Array<{ name: string; size: number; path: string }> = [];
+    if (filePaths.length > 0) {
+      fileInfos = await window.electronAPI.dialog.resolveDroppedFiles(filePaths);
     }
 
-    if (accepted.length > 0) {
-      checkAndUpload(accepted);
+    if (fileInfos.length === 0) {
+      const { accepted, rejected } = processFiles(
+        rawFiles.map((f) => ({ name: f.name, size: f.size, path: f.path || '' }))
+      );
+      if (rejected) setRejectedFiles(rejected);
+      if (accepted.length > 0) checkAndUpload(accepted);
+      return;
     }
+
+    const { accepted, rejected } = processFiles(fileInfos);
+    if (rejected) setRejectedFiles(rejected);
+    if (accepted.length > 0) checkAndUpload(accepted);
   };
 
   const dismissRejected = () => {
