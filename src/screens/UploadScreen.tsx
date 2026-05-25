@@ -244,25 +244,57 @@ export default function UploadScreen({
     dragCounter.current = 0;
     setIsDragging(false);
 
-    // In Electron, resolve file paths through main process for reliable filesystem access
+    console.log('[DROP] handleDrop fired');
+    console.log('[DROP] dataTransfer.files count:', e.dataTransfer.files.length);
+    console.log('[DROP] dataTransfer.items count:', e.dataTransfer.items.length);
+
     const rawFiles = Array.from(e.dataTransfer.files) as Array<File & { path?: string }>;
-    const filePaths = rawFiles.map((f) => f.path).filter((p): p is string => !!p);
+    rawFiles.forEach((f, i) => {
+      console.log(`[DROP] file[${i}]: name=${f.name} size=${f.size} path=${JSON.stringify((f as any).path)}`);
+    });
+
+    // ── Path-based flow (Electron normally provides file.path) ──
+    const filePaths = rawFiles.map((f) => (f as any).path as string | undefined).filter((p): p is string => !!p);
+    console.log('[DROP] resolved filePaths:', filePaths);
 
     let fileInfos: Array<{ name: string; size: number; path: string }> = [];
+
     if (filePaths.length > 0) {
+      console.log('[DROP] calling resolveDroppedFiles via IPC...');
       fileInfos = await window.electronAPI.dialog.resolveDroppedFiles(filePaths);
+      console.log('[DROP] resolveDroppedFiles returned:', fileInfos.length, 'files');
+    }
+
+    // ── ArrayBuffer fallback: file.path unavailable (Electron 41+ on macOS Sequoia) ──
+    if (fileInfos.length === 0 && rawFiles.length > 0) {
+      console.warn('[DROP] file.path unavailable — reading files as ArrayBuffer and writing to temp dir');
+      try {
+        const toWrite: Array<{ name: string; buffer: ArrayBuffer }> = [];
+        for (const f of rawFiles) {
+          // Skip directories (size 0, no type) — folders can't be read this way
+          if (!f.type && f.size === 0) {
+            console.warn(`[DROP] skipping likely-directory: ${f.name}`);
+            continue;
+          }
+          const buf = await f.arrayBuffer();
+          toWrite.push({ name: f.name, buffer: buf });
+        }
+        if (toWrite.length > 0) {
+          fileInfos = await window.electronAPI.dialog.writeFilesToTemp(toWrite);
+          console.log('[DROP] writeFilesToTemp returned:', fileInfos.length, 'files');
+        }
+      } catch (err) {
+        console.error('[DROP] ArrayBuffer fallback failed:', err);
+      }
     }
 
     if (fileInfos.length === 0) {
-      const { accepted, rejected } = processFiles(
-        rawFiles.map((f) => ({ name: f.name, size: f.size, path: f.path || '' }))
-      );
-      if (rejected) setRejectedFiles(rejected);
-      if (accepted.length > 0) checkAndUpload(accepted);
+      console.warn('[DROP] no files resolved — nothing to upload');
       return;
     }
 
     const { accepted, rejected } = processFiles(fileInfos);
+    console.log('[DROP] accepted:', accepted.length, 'rejected:', rejected?.count ?? 0);
     if (rejected) setRejectedFiles(rejected);
     if (accepted.length > 0) checkAndUpload(accepted);
   };

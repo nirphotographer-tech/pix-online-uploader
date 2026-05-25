@@ -148,9 +148,9 @@ function createWindow(): void {
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     fileLog(`[RENDERER] render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`);
   });
-  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
-    if (level >= 2) { // warn/error only
-      fileLog(`[RENDERER CONSOLE] level=${level} line=${line} src=${sourceId}: ${message}`);
+  mainWindow.webContents.on('console-message', (_event, level, message, line, _sourceId) => {
+    if (level >= 1) { // info/warn/error (excludes verbose)
+      fileLog(`[RENDERER] level=${level} line=${line}: ${message}`);
     }
   });
   mainWindow.webContents.on('did-finish-load', () => {
@@ -297,22 +297,47 @@ ipcMain.handle('dialog:openFolder', async () => {
 });
 
 ipcMain.handle('dialog:resolveDroppedFiles', (_event, filePaths: string[]) => {
+  fileLog(`[DROP-IPC] resolveDroppedFiles called with ${filePaths.length} paths:`, filePaths);
   const imageExts = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif', '.heic', '.heif']);
   const resolved: string[] = [];
   for (const p of filePaths) {
     try {
       const stat = fs.statSync(p);
+      fileLog(`[DROP-IPC] path=${p} isDir=${stat.isDirectory()} ext=${path.extname(p).toLowerCase()}`);
       if (stat.isDirectory()) {
-        // Recursively scan dropped folders (same as openFolder)
-        resolved.push(...scanFolderForImages(p));
+        const found = scanFolderForImages(p);
+        fileLog(`[DROP-IPC] folder scan found ${found.length} images in ${p}`);
+        resolved.push(...found);
       } else if (imageExts.has(path.extname(p).toLowerCase())) {
         resolved.push(p);
+      } else {
+        fileLog(`[DROP-IPC] skipped (not image, not dir): ${p}`);
       }
-    } catch {
-      // skip paths that can't be stat'd
+    } catch (err) {
+      fileLog(`[DROP-IPC] statSync failed for ${p}:`, err);
     }
   }
+  fileLog(`[DROP-IPC] returning ${resolved.length} files`);
   return resolved.map(getFileInfo);
+});
+
+// Write dropped files (received as ArrayBuffer when file.path is unavailable) to OS temp dir
+const os = require('os');
+ipcMain.handle('dialog:writeFilesToTemp', async (_event, files: Array<{ name: string; buffer: ArrayBuffer }>) => {
+  const tmpDir = path.join(os.tmpdir(), 'pix-uploader-drop');
+  fs.mkdirSync(tmpDir, { recursive: true });
+  fileLog(`[DROP-TMP] writing ${files.length} files to ${tmpDir}`);
+  const results: ReturnType<typeof getFileInfo>[] = [];
+  for (const file of files) {
+    const safeName = `${Date.now()}-${path.basename(file.name)}`;
+    const tmpPath = path.join(tmpDir, safeName);
+    fs.writeFileSync(tmpPath, Buffer.from(file.buffer));
+    const info = getFileInfo(tmpPath);
+    info.name = file.name; // preserve original filename for display/dedup
+    fileLog(`[DROP-TMP] wrote ${file.name} → ${tmpPath} (${info.size} bytes)`);
+    results.push(info);
+  }
+  return results;
 });
 
 // Power save blocker

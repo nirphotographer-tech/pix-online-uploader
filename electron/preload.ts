@@ -64,6 +64,7 @@ export interface ElectronAPI {
     openFiles: () => Promise<UploadFileInfo[]>;
     openFolder: () => Promise<UploadFileInfo[]>;
     resolveDroppedFiles: (filePaths: string[]) => Promise<UploadFileInfo[]>;
+    writeFilesToTemp: (files: Array<{ name: string; buffer: ArrayBuffer }>) => Promise<UploadFileInfo[]>;
   };
   power: {
     preventSleep: () => Promise<number>;
@@ -123,6 +124,7 @@ const electronAPI: ElectronAPI = {
     openFiles: () => ipcRenderer.invoke('dialog:openFiles'),
     openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
     resolveDroppedFiles: (filePaths: string[]) => ipcRenderer.invoke('dialog:resolveDroppedFiles', filePaths),
+    writeFilesToTemp: (files: Array<{ name: string; buffer: ArrayBuffer }>) => ipcRenderer.invoke('dialog:writeFilesToTemp', files),
   },
   power: {
     preventSleep: () => ipcRenderer.invoke('power:preventSleep'),
