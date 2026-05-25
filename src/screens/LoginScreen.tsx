@@ -129,7 +129,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
           </div>
           <h1 className="text-2xl font-bold text-gray-900 text-center">Pix Online</h1>
           <p className="text-gray-500 text-sm mt-1 text-center">כלי העלאה מהיר לצלמים</p>
-          <span className="text-[10px] text-gray-400 mt-1">v2.4.0</span>
+          <span className="text-[10px] text-gray-400 mt-1">v2.4.5</span>
         </div>
 
         {/* Error */}
