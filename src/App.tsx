@@ -7,7 +7,7 @@ import { supabase } from './lib/supabase';
 import { runGalleryFaceScan } from './lib/face-scan';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.5.4';
+const APP_VERSION = '2.4.5';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -449,8 +449,27 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen">
-      {/* macOS traffic light drag region */}
-      <div className="h-9 flex-shrink-0" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties} />
+      {/* Title bar drag region with custom window controls */}
+      <div className="h-9 flex-shrink-0 relative flex items-center" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
+        {window.electronAPI.windowControls.platform === 'win32' && (
+          <div className="flex items-center" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
+            <button
+              onClick={() => window.electronAPI.windowControls.close()}
+              className="w-9 h-9 flex items-center justify-center text-[#1f2937] hover:bg-[#ef4444] hover:text-white transition-colors text-sm"
+              title="סגירה"
+            >
+              &#x2715;
+            </button>
+            <button
+              onClick={() => window.electronAPI.windowControls.minimize()}
+              className="w-9 h-9 flex items-center justify-center text-[#1f2937] hover:bg-[#e5e7eb] transition-colors text-sm"
+              title="מזעור"
+            >
+              &#x2212;
+            </button>
+          </div>
+        )}
+      </div>
 
 
       {/* Pending sessions are auto-resumed silently on load/reconnect */}

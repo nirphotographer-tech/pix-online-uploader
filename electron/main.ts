@@ -117,15 +117,16 @@ const SUPABASE_URL = process.env.VITE_SUPABASE_URL || 'https://hxiwmsglhwvlcclwz
 const SUPABASE_ANON_KEY = process.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh4aXdtc2dsaHd2bGNjbHd6em9kIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQ3MDAyOTAsImV4cCI6MjA4MDI3NjI5MH0.MjtgrJ3H-zGLdr5Xu722eJG2nYE_O_b44s4WhYa5KDk';
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin';
   mainWindow = new BrowserWindow({
     width: 900,
     height: 700,
     minWidth: 700,
     minHeight: 500,
     backgroundColor: '#0f0f0f',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 15, y: 10 },
-    icon: path.join(__dirname, 'icon.icns'),
+    titleBarStyle: isMac ? 'hiddenInset' : 'hidden',
+    ...(isMac ? { trafficLightPosition: { x: 15, y: 10 } } : {}),
+    icon: path.join(__dirname, isMac ? 'icon.icns' : 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -136,7 +137,6 @@ function createWindow(): void {
 
   if (isDev) {
     mainWindow.loadURL('http://localhost:5173');
-    mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
   }
@@ -466,6 +466,10 @@ ipcMain.handle('upload:getSessions', () => {
 ipcMain.handle('upload:hasActiveSessions', () => {
   return uploadManager?.hasActiveSessions() || false;
 });
+
+// Window controls (for custom title bar on Windows)
+ipcMain.on('window:minimize', () => mainWindow?.minimize());
+ipcMain.on('window:close', () => mainWindow?.close());
 
 // API base URL
 ipcMain.handle('config:getApiBaseUrl', () => {

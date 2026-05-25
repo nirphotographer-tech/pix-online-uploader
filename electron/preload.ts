@@ -112,6 +112,11 @@ export interface ElectronAPI {
       token: string
     ) => Promise<{ file_name: string; id: string; size_bytes: number | null }[]>;
   };
+  windowControls: {
+    minimize: () => void;
+    close: () => void;
+    platform: string;
+  };
 }
 
 const electronAPI: ElectronAPI = {
@@ -194,6 +199,11 @@ const electronAPI: ElectronAPI = {
   gallery: {
     checkDuplicates: (galleryId, folderId, fileNames, token) =>
       ipcRenderer.invoke('gallery:checkDuplicates', galleryId, folderId, fileNames, token),
+  },
+  windowControls: {
+    minimize: () => ipcRenderer.send('window:minimize'),
+    close: () => ipcRenderer.send('window:close'),
+    platform: process.platform,
   },
 };
 
