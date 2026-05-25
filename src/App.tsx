@@ -7,7 +7,7 @@ import { supabase } from './lib/supabase';
 import { runGalleryFaceScan } from './lib/face-scan';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.5.3';
+const APP_VERSION = '2.5.4';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 

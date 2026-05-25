@@ -298,9 +298,21 @@ ipcMain.handle('dialog:openFolder', async () => {
 
 ipcMain.handle('dialog:resolveDroppedFiles', (_event, filePaths: string[]) => {
   const imageExts = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tiff', '.tif', '.heic', '.heif']);
-  return filePaths
-    .filter((p) => imageExts.has(path.extname(p).toLowerCase()))
-    .map(getFileInfo);
+  const resolved: string[] = [];
+  for (const p of filePaths) {
+    try {
+      const stat = fs.statSync(p);
+      if (stat.isDirectory()) {
+        // Recursively scan dropped folders (same as openFolder)
+        resolved.push(...scanFolderForImages(p));
+      } else if (imageExts.has(path.extname(p).toLowerCase())) {
+        resolved.push(p);
+      }
+    } catch {
+      // skip paths that can't be stat'd
+    }
+  }
+  return resolved.map(getFileInfo);
 });
 
 // Power save blocker
