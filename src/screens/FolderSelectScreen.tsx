@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
+import { notifyFoldersChanged, onFoldersChanged } from '../lib/galleryChannel';
+import { galleryExists } from '../lib/folderCheck';
 import type { UploadSessionInfo } from '../../electron/preload';
 
 export interface FolderItem {
@@ -19,6 +21,8 @@ interface FolderSelectScreenProps {
   userId: string;
   onSelectFolder: (folderId: string, folderName: string) => void;
   onBack: () => void;
+  /** The gallery itself was deleted on the website */
+  onGalleryDeleted: () => void;
   uploadSessions?: UploadSessionInfo[];
   initialFolders?: FolderItem[];
   onFoldersLoaded?: (folders: FolderItem[]) => void;
@@ -31,6 +35,7 @@ export default function FolderSelectScreen({
   userId,
   onSelectFolder,
   onBack,
+  onGalleryDeleted,
   uploadSessions = [],
   initialFolders,
   onFoldersLoaded,
@@ -42,6 +47,8 @@ export default function FolderSelectScreen({
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [creating, setCreating] = useState(false);
+  const onGalleryDeletedRef = useRef(onGalleryDeleted);
+  onGalleryDeletedRef.current = onGalleryDeleted;
 
   const ensureDefaultFolder = useCallback(
     async () => {
@@ -60,6 +67,8 @@ export default function FolderSelectScreen({
       });
       if (insertError) {
         console.log('Default folder insert:', insertError.message);
+      } else {
+        notifyFoldersChanged(galleryId);
       }
     },
     [galleryId, galleryName, userId]
@@ -94,6 +103,12 @@ export default function FolderSelectScreen({
           });
           foldersWithCounts.push(...(await Promise.all(countPromises)));
         } else {
+          // No folders at all: either a new gallery (create the default folder)
+          // or the gallery was deleted on the website — then don't create anything.
+          if ((await galleryExists(galleryId)) === false) {
+            onGalleryDeletedRef.current();
+            return;
+          }
           await ensureDefaultFolder();
           const { data: newData } = await supabase
             .from('gallery_folders')
@@ -136,7 +151,11 @@ export default function FolderSelectScreen({
         .select('*')
         .eq('gallery_id', galleryId)
         .order('folder_index', { ascending: true });
-      if (syncError || !data || data.length === 0) return;
+      if (syncError || !data) return;
+      if (data.length === 0) {
+        if ((await galleryExists(galleryId)) === false) onGalleryDeletedRef.current();
+        return;
+      }
       const prev = foldersRef.current;
       const changed = data.length !== prev.length ||
         data.some((f: FolderItem, i: number) => f.id !== prev[i]?.id || f.name !== prev[i]?.name);
@@ -149,9 +168,12 @@ export default function FolderSelectScreen({
     const interval = setInterval(syncFolderList, 15_000);
     const onFocus = () => fetchFolders(true);
     window.addEventListener('focus', onFocus);
+    // Instant update when the website's editor changes folders (the poll is the fallback)
+    const unsubscribe = onFoldersChanged(galleryId, () => fetchFolders(true));
     return () => {
       clearInterval(interval);
       window.removeEventListener('focus', onFocus);
+      unsubscribe();
     };
   }, [galleryId, fetchFolders, onFoldersLoaded]);
 
@@ -203,6 +225,7 @@ export default function FolderSelectScreen({
         throw new Error(insertError.message);
       }
 
+      notifyFoldersChanged(galleryId);
       setNewFolderName('');
       setShowNewFolder(false);
       await fetchFolders(true);

@@ -1,4 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { checkFolder } from '../lib/folderCheck';
+import { onFoldersChanged } from '../lib/galleryChannel';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'tiff', 'tif', 'heic', 'heif'];
 const SUPPORTED_FORMATS_DISPLAY = ['JPG', 'PNG', 'WebP', 'TIFF', 'HEIC'];
@@ -37,6 +39,8 @@ interface UploadScreenProps {
   token: string;
   onBack: () => void;
   onUploadStarted: () => void;
+  /** The gallery itself was deleted on the website */
+  onGalleryDeleted: () => void;
 }
 
 interface FileInfo {
@@ -65,6 +69,7 @@ export default function UploadScreen({
   token,
   onBack,
   onUploadStarted,
+  onGalleryDeleted,
 }: UploadScreenProps) {
   const [isDragging, setIsDragging] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -74,6 +79,54 @@ export default function UploadScreen({
   const [allPendingFiles, setAllPendingFiles] = useState<FileInfo[]>([]);
   const dragCounter = useRef(0);
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The folder can be renamed or deleted on the website while this screen is open
+  const [currentFolderName, setCurrentFolderName] = useState(folderName);
+  const currentFolderNameRef = useRef(folderName);
+  currentFolderNameRef.current = currentFolderName;
+  const leftRef = useRef(false);
+  const onBackRef = useRef(onBack);
+  onBackRef.current = onBack;
+  const onGalleryDeletedRef = useRef(onGalleryDeleted);
+  onGalleryDeletedRef.current = onGalleryDeleted;
+
+  /** false = the folder (or gallery) is gone and we're leaving this screen */
+  const verifyFolder = useCallback(async (): Promise<boolean> => {
+    if (leftRef.current) return false;
+    const result = await checkFolder(galleryId, folderId);
+    if (leftRef.current) return false;
+    switch (result.state) {
+      case 'ok':
+        if (result.name !== currentFolderNameRef.current) setCurrentFolderName(result.name);
+        return true;
+      case 'folder-deleted':
+        leftRef.current = true;
+        window.alert(`התיקייה "${currentFolderNameRef.current}" נמחקה באתר.`);
+        onBackRef.current();
+        return false;
+      case 'gallery-deleted':
+        leftRef.current = true;
+        onGalleryDeletedRef.current();
+        return false;
+      default:
+        // not-created-yet: the upload creates the default folder; unknown: let the upload find out
+        return true;
+    }
+  }, [galleryId, folderId]);
+
+  useEffect(() => {
+    verifyFolder();
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') verifyFolder();
+    }, 15_000);
+    const onFocus = () => verifyFolder();
+    window.addEventListener('focus', onFocus);
+    const unsubscribe = onFoldersChanged(galleryId, () => verifyFolder());
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+      unsubscribe();
+    };
+  }, [galleryId, verifyFolder]);
 
   // Auto-dismiss rejected files toast
   useEffect(() => {
@@ -120,16 +173,18 @@ export default function UploadScreen({
     setDuplicateInfo(null);
     setAllPendingFiles([]);
     try {
+      // Last check right before starting — the folder may have been deleted on the site
+      if (!(await verifyFolder())) return;
       const sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       await window.electronAPI.upload.startSession(
-        sessionId, fileInfos, galleryId, galleryName, folderId, folderName, token
+        sessionId, fileInfos, galleryId, galleryName, folderId, currentFolderNameRef.current, token
       );
       onUploadStarted();
     } catch (err) {
       console.error('Failed to start upload:', err);
       setStarting(false);
     }
-  }, [galleryId, galleryName, folderId, folderName, token, onUploadStarted]);
+  }, [galleryId, galleryName, folderId, token, onUploadStarted, verifyFolder]);
 
   const checkAndUpload = useCallback(async (acceptedFiles: FileInfo[]) => {
     if (acceptedFiles.length === 0) return;
@@ -317,14 +372,14 @@ export default function UploadScreen({
         </button>
         <div className="flex-1 min-w-0">
           <h1 className="text-lg font-bold text-gray-900 truncate">{galleryName}</h1>
-          {folderName && folderName !== 'כל הגלריה' && (
+          {currentFolderName && currentFolderName !== 'כל הגלריה' && (
             <div className="flex items-center gap-1.5 mt-0.5">
               <span className="inline-flex items-center gap-1 text-xs text-brand-primary/70 bg-brand-primary/10 px-2 py-0.5 rounded-md">
                 <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
                     d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
                 </svg>
-                {folderName}
+                {currentFolderName}
               </span>
             </div>
           )}

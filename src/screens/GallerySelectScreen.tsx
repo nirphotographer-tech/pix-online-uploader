@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 
 interface Gallery {
@@ -61,6 +61,42 @@ export default function GallerySelectScreen({
   useEffect(() => {
     fetchGalleries();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Galleries created, renamed or deleted on the website while this window was
+  // in the background show up when it regains focus. Only the galleries table
+  // is read (cheap) — the full load with photo counts stays on the refresh button.
+  const lastFocusSyncRef = useRef(0);
+  useEffect(() => {
+    const syncGalleryList = async () => {
+      if (Date.now() - lastFocusSyncRef.current < 10_000) return;
+      lastFocusSyncRef.current = Date.now();
+      const { data, error: syncError } = await supabase
+        .from('galleries')
+        .select('id, name, share_id, is_published, created_at, updated_at, user_id, cover_image, photo_count, event_date')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false });
+      if (syncError || !data) return;
+      setGalleries((prev) => {
+        const prevById = new Map(prev.map((g) => [g.id, g]));
+        return (data as Gallery[]).map((g) => {
+          const old = prevById.get(g.id);
+          // Keep what the full load enriched (cover / event date from the API)
+          return old
+            ? { ...old, ...g, cover_image: g.cover_image || old.cover_image, event_date: g.event_date || old.event_date }
+            : g;
+        });
+      });
+      setPhotoCounts((prev) => {
+        const next = { ...prev };
+        for (const g of data as Gallery[]) {
+          if (next[g.id] === undefined) next[g.id] = g.photo_count || 0;
+        }
+        return next;
+      });
+    };
+    window.addEventListener('focus', syncGalleryList);
+    return () => window.removeEventListener('focus', syncGalleryList);
+  }, [userId]);
 
   const fetchGalleries = async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);

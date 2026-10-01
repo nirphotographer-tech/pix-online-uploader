@@ -5,6 +5,7 @@ import FolderSelectScreen, { type FolderItem } from './screens/FolderSelectScree
 import UploadScreen from './screens/UploadScreen';
 import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
+import { sendUploadProgress, removeAllGalleryChannels } from './lib/galleryChannel';
 import type { UploadSessionInfo } from '../electron/preload';
 
 const APP_VERSION = '2.5.0';
@@ -171,31 +172,7 @@ export default function App() {
   useEffect(() => {
     if (!window.electronAPI) return;
 
-    const channels = new Map<string, ReturnType<typeof supabase.channel>>();
-    const channelReady = new Map<string, boolean>();
-    const pendingMessages = new Map<string, any>();
     const lastBroadcast = new Map<string, number>();
-
-    const getOrCreateChannel = (galleryId: string) => {
-      if (channels.has(galleryId)) return channels.get(galleryId)!;
-      
-      const channel = supabase.channel(`uploader-progress:${galleryId}`);
-      channels.set(galleryId, channel);
-      
-      channel.subscribe((status) => {
-        if (status === 'SUBSCRIBED') {
-          channelReady.set(galleryId, true);
-          const pending = pendingMessages.get(galleryId);
-          if (pending) {
-            channel.send({ type: 'broadcast', event: 'upload-progress', payload: pending });
-            pendingMessages.delete(galleryId);
-          }
-        }
-      });
-      
-      return channel;
-    };
-
     const lastCompletedFiles = new Map<string, number>();
 
     const latestSessions = new Map<string, UploadSessionInfo>();
@@ -228,12 +205,7 @@ export default function App() {
         errorMessage: session.errorMessage,
       };
 
-      const channel = getOrCreateChannel(session.galleryId);
-      if (channelReady.get(session.galleryId)) {
-        channel.send({ type: 'broadcast', event: 'upload-progress', payload });
-      } else {
-        pendingMessages.set(session.galleryId, payload);
-      }
+      sendUploadProgress(session.galleryId, payload);
     };
 
     const upsertSession = (session: UploadSessionInfo) => {
@@ -282,7 +254,7 @@ export default function App() {
       unsubComplete();
       clearInterval(heartbeat);
       broadcastFinalRef.current = null;
-      channels.forEach((channel) => supabase.removeChannel(channel));
+      removeAllGalleryChannels();
     };
   }, []);
 
@@ -436,6 +408,15 @@ export default function App() {
     navigateTo('login');
   }, [navigateTo]);
 
+  const handleGalleryDeleted = useCallback(() => {
+    window.alert('הגלריה נמחקה באתר.');
+    setGallery(null);
+    setFolder(null);
+    setCachedFolders([]);
+    setGalleryKey((k) => k + 1);
+    navigateTo('galleries');
+  }, [navigateTo]);
+
   const handleBackToGalleries = useCallback(() => {
     setGallery(null);
     setFolder(null);
@@ -536,6 +517,7 @@ export default function App() {
             userId={auth.userId}
             onSelectFolder={handleSelectFolder}
             onBack={handleBackToGalleries}
+            onGalleryDeleted={handleGalleryDeleted}
             uploadSessions={uploadSessions}
             initialFolders={cachedFolders.length > 0 ? cachedFolders : undefined}
             onFoldersLoaded={setCachedFolders}
@@ -550,6 +532,7 @@ export default function App() {
             token={auth.token}
             onBack={handleBackToFolders}
             onUploadStarted={handleUploadStarted}
+            onGalleryDeleted={handleGalleryDeleted}
           />
         )}
       </div>

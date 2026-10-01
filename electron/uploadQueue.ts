@@ -92,6 +92,7 @@ const NETWORK_ERROR_RE = /fetch failed|Failed to fetch|NetworkError|ERR_INTERNET
 const PERMANENT_HTTP_STATUSES = new Set([400, 403, 413, 415, 422]);
 
 const SESSION_ERROR_GALLERY_DELETED = 'הגלריה נמחקה מהאתר — ההעלאה נעצרה';
+const SESSION_ERROR_FOLDER_DELETED = 'התיקייה נמחקה באתר — ההעלאה נעצרה';
 
 // ============================================================================
 // HTTP helpers
@@ -560,12 +561,26 @@ export class UploadQueue {
             return;
           }
 
-          // The folder row is gone (e.g. deleted by an autosave on the site) — recreate it once
-          if (body.includes('gallery_photos_folder_id_fkey') && !this.folderEnsured) {
-            this.folderEnsured = true;
-            await this.ensureFolderExists();
-            skipNextRetryDelay = true;
-            continue;
+          // The target folder row doesn't exist
+          if (body.includes('gallery_photos_folder_id_fkey')) {
+            const hasFolders = await this.galleryHasFolders();
+            if (this.isCancelled || this.sessionErrorMsg) return;
+            if (hasFolders === true) {
+              // The gallery has other folders, so the photographer deleted this
+              // one on the site (the site never deletes the last folder). Don't
+              // bring it back — stop the session.
+              console.error(`[Upload] 🚫 Folder ${this.options.folderId} was deleted on the site — stopping session`);
+              this.failSession(SESSION_ERROR_FOLDER_DELETED);
+              return;
+            }
+            if (hasFolders === false && !this.folderEnsured) {
+              // No folders at all: the site's default folder was never saved yet — create it once
+              this.folderEnsured = true;
+              await this.ensureFolderExists();
+              skipNextRetryDelay = true;
+              continue;
+            }
+            // Couldn't tell (network) — normal retry below
           }
 
           if (status === 403 && !lastError.message.startsWith('R2 PUT') && /storage/i.test(body)) {
@@ -605,8 +620,33 @@ export class UploadQueue {
     this.options.onFileComplete(file.id, false, message, retryable);
   }
 
+  /** Does the gallery have any folder rows? null = couldn't tell */
+  private async galleryHasFolders(): Promise<boolean | null> {
+    try {
+      const url = `${this.options.supabaseUrl}/rest/v1/gallery_folders?gallery_id=eq.${encodeURIComponent(this.options.galleryId)}&select=id&limit=1`;
+      const res = await fetch(url, {
+        headers: {
+          'apikey': this.options.supabaseKey,
+          'Authorization': `Bearer ${this.options.getToken()}`,
+        },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        console.warn(`[Upload] Folder check HTTP ${res.status}`);
+        return null;
+      }
+      const rows = await res.json();
+      return Array.isArray(rows) ? rows.length > 0 : null;
+    } catch (err) {
+      console.warn('[Upload] Folder check error:', describeError(err));
+      return null;
+    }
+  }
+
   /**
-   * Recreate the target folder if it was deleted while uploading.
+   * Create the target folder when the gallery has no folder rows at all (the
+   * site shows a default folder before it is first saved). Never used for a
+   * folder that was deleted on the site.
    * Insert-or-ignore, so an existing folder (and its name) is never touched.
    */
   private async ensureFolderExists(): Promise<void> {
@@ -630,7 +670,7 @@ export class UploadQueue {
           user_id: userId,
           photographer_id: userId,
           parent_id: null,
-          folder_index: 999,
+          folder_index: 0,
           position: 0,
           is_default: /-folder-1$/.test(folderId),
           photo_count: 0,
