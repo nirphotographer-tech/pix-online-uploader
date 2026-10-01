@@ -6,6 +6,7 @@
  */
 
 import { UploadQueue, ProgressPayload, StatsPayload } from './uploadQueue';
+import { UploadSlots, Semaphore } from './slotPool';
 
 export interface UploadSessionInfo {
   sessionId: string;
@@ -41,7 +42,10 @@ interface UploadManagerOptions {
   apiBaseUrl: string;
   supabaseUrl: string;
   supabaseKey: string;
+  /** Files uploading at once, across all sessions */
   concurrency: number;
+  /** Save calls (/api/r2/process) at once, across all sessions */
+  maxParallelSaves: number;
   getToken: () => string;
   refreshToken: () => Promise<string>;
   onSessionUpdate: (session: UploadSessionInfo) => void;
@@ -63,9 +67,14 @@ export interface StartSessionOptions {
 export class UploadManager {
   private sessions = new Map<string, SessionEntry>();
   private options: UploadManagerOptions;
+  // Shared by every session: more folders at once don't mean more load
+  private uploadSlots: UploadSlots;
+  private processSlots: Semaphore;
 
   constructor(options: UploadManagerOptions) {
     this.options = options;
+    this.uploadSlots = new UploadSlots(options.concurrency);
+    this.processSlots = new Semaphore(options.maxParallelSaves);
   }
 
   /**
@@ -135,6 +144,8 @@ export class UploadManager {
 
     const queue = new UploadQueue({
       concurrency: this.options.concurrency,
+      uploadSlots: this.uploadSlots,
+      processSlots: this.processSlots,
       apiBaseUrl: this.options.apiBaseUrl,
       galleryId: info.galleryId,
       folderId: info.folderId,
