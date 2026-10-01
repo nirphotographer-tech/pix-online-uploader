@@ -194,7 +194,7 @@ export default function FolderSelectScreen({
       if (listError) throw new Error(listError.message);
       const all = [...(dbFolders || []), ...folders];
 
-      const existing = (dbFolders || []).find((f) => f.name.trim() === trimmed);
+      const existing = (dbFolders || []).find((f) => f.name.trim().toLowerCase() === trimmed.toLowerCase());
       if (existing) throw new Error('כבר קיימת תיקייה בשם הזה');
 
       const maxIndex = all.reduce((max, f) => Math.max(max, f.folder_index ?? 0), -1);

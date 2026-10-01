@@ -20,6 +20,8 @@ interface FileEntry {
   /** false = retrying later won't help (bad file, rejected by server) */
   retryable?: boolean;
   lastModified?: number;
+  /** "Replace" chosen: the server puts this file in that existing photo's place */
+  replacePhotoId?: string;
   processResult?: ProcessResult;
   /** Upload URL fetched ahead of time in a batch (valid for an hour) */
   presign?: PresignResponse & { size: number; at: number };
@@ -245,7 +247,7 @@ export class UploadQueue {
     console.log(`[Upload] Queue created: galleryId=${options.galleryId}, folderId=${options.folderId || 'NONE'}, concurrency=${options.concurrency}`);
   }
 
-  addFiles(files: Array<{ path: string; name: string; size: number; type: string }>): void {
+  addFiles(files: Array<{ path: string; name: string; size: number; type: string; replacePhotoId?: string }>): void {
     for (const file of files) {
       let lastModified: number | undefined;
       try {
@@ -262,6 +264,7 @@ export class UploadQueue {
         loaded: 0,
         peakLoaded: 0,
         lastModified,
+        replacePhotoId: file.replacePhotoId,
       });
     }
     console.log(`[Upload] addFiles: ${files.length} files`);
@@ -834,6 +837,7 @@ export class UploadQueue {
           ...(saved.width && saved.height && { imageWidth: saved.width, imageHeight: saved.height }),
           ...(this.options.folderId && { folderId: this.options.folderId }),
           ...(file.lastModified && { captureTime: new Date(file.lastModified).toISOString() }),
+          ...(file.replacePhotoId && { replacePhotoId: file.replacePhotoId }),
         },
         this.options.getToken(),
         PROCESS_TIMEOUT,

@@ -527,7 +527,7 @@ ipcMain.handle(
   async (
     _event,
     sessionId: string,
-    files: Array<{ path: string; name: string; size: number; type: string }>,
+    files: Array<{ path: string; name: string; size: number; type: string; replacePhotoId?: string }>,
     galleryId: string,
     galleryName: string,
     folderId: string,
@@ -594,51 +594,63 @@ ipcMain.on('auth:setToken', (_event, token: string) => {
   setAccessToken(token);
 });
 
-// Duplicate check: query existing photos in gallery by file_name + size_bytes
+// Duplicate check: photos in the whole gallery (every folder) with these file names.
+// The caller decides what counts as a duplicate. Throws when the check couldn't
+// run, so the photographer is asked instead of the upload starting blind.
 ipcMain.handle(
   'gallery:checkDuplicates',
   async (
     _event,
     galleryId: string,
-    folderId: string,
     fileNames: string[],
     token: string
-  ): Promise<{ file_name: string; id: string; size_bytes: number | null }[]> => {
+  ): Promise<{ file_name: string; id: string; size_bytes: number | null; folder_id: string | null }[]> => {
     if (fileNames.length === 0) return [];
     // Small batches: one URL with thousands of names exceeds URL limits and the
     // whole check silently failed for big folders.
     const BATCH = 80;
     // PostgREST in-list: quote every value, escape backslashes and quotes
     const quote = (n: string) => `"${n.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
-    const rows: { id: string; file_name: string; size_bytes: number | null }[] = [];
-    try {
-      for (let i = 0; i < fileNames.length; i += BATCH) {
-        const batch = Array.from(new Set(fileNames.slice(i, i + BATCH)));
-        const namesParam = `(${batch.map(quote).join(',')})`;
-        let url = `${SUPABASE_URL}/rest/v1/gallery_photos?gallery_id=eq.${encodeURIComponent(galleryId)}&file_name=in.${encodeURIComponent(namesParam)}&select=id,file_name,size_bytes`;
-        if (folderId) url += `&folder_id=eq.${encodeURIComponent(folderId)}`;
-
-        const res = await fetch(url, {
-          headers: {
-            'apikey': SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${token || accessToken}`,
-          },
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!res.ok) {
-          console.warn(`[DupCheck] HTTP ${res.status}: ${await res.text()}`);
-          continue; // On error, allow upload (don't block)
+    const rows: { id: string; file_name: string; size_bytes: number | null; folder_id: string | null }[] = [];
+    const names = Array.from(new Set(fileNames));
+    for (let i = 0; i < names.length; i += BATCH) {
+      const namesParam = `(${names.slice(i, i + BATCH).map(quote).join(',')})`;
+      const url = `${SUPABASE_URL}/rest/v1/gallery_photos?gallery_id=eq.${encodeURIComponent(galleryId)}&file_name=in.${encodeURIComponent(namesParam)}&select=id,file_name,size_bytes,folder_id`;
+      let lastError = '';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch(url, {
+            headers: {
+              'apikey': SUPABASE_ANON_KEY,
+              'Authorization': `Bearer ${token || accessToken}`,
+            },
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (res.ok) {
+            rows.push(...((await res.json()) as typeof rows));
+            lastError = '';
+            break;
+          }
+          lastError = `HTTP ${res.status}: ${await res.text()}`;
+        } catch (err) {
+          lastError = err instanceof Error ? err.message : String(err);
         }
-        rows.push(...((await res.json()) as typeof rows));
+        await new Promise((r) => setTimeout(r, attempt * 1000));
       }
-      console.log(`[DupCheck] Found ${rows.length} existing photos matching ${fileNames.length} file names`);
-      return rows;
-    } catch (err) {
-      console.warn('[DupCheck] Error:', err);
-      return rows; // On error, allow upload
+      if (lastError) {
+        console.warn(`[DupCheck] Failed: ${lastError}`);
+        throw new Error(lastError);
+      }
     }
+    console.log(`[DupCheck] Found ${rows.length} photos in the gallery matching ${names.length} file names`);
+    return rows;
   }
 );
+
+// Files of this gallery that are still uploading (not in the DB yet)
+ipcMain.handle('upload:getActiveFiles', (_event, galleryId: string) => {
+  return uploadManager?.getActiveFiles(galleryId) || [];
+});
 
 // ── Pending sessions IPC (resume after restart) ──
 

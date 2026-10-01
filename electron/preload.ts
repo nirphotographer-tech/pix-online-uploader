@@ -5,6 +5,15 @@ export interface UploadFileInfo {
   name: string;
   size: number;
   type: string;
+  /** "Replace" chosen: the file takes this existing photo's place */
+  replacePhotoId?: string;
+}
+
+export interface ActiveUploadFile {
+  name: string;
+  size: number;
+  folderId: string;
+  folderName: string;
 }
 
 export interface UploadSessionInfo {
@@ -92,6 +101,8 @@ export interface ElectronAPI {
     dismissSession: (sessionId: string) => Promise<void>;
     getSessions: () => Promise<UploadSessionInfo[]>;
     hasActiveSessions: () => Promise<boolean>;
+    /** Files of this gallery still uploading or waiting to (not in the DB yet) */
+    getActiveFiles: (galleryId: string) => Promise<ActiveUploadFile[]>;
     getPendingSessions: () => Promise<PersistedSessionInfo[]>;
     dismissPendingSession: (sessionId: string) => Promise<void>;
     resumePendingSession: (sessionId: string, token: string) => Promise<{ resumed: boolean; newSessionId?: string; remainingCount?: number; reason?: string }>;
@@ -114,10 +125,9 @@ export interface ElectronAPI {
   gallery: {
     checkDuplicates: (
       galleryId: string,
-      folderId: string,
       fileNames: string[],
       token: string
-    ) => Promise<{ file_name: string; id: string; size_bytes: number | null }[]>;
+    ) => Promise<{ file_name: string; id: string; size_bytes: number | null; folder_id: string | null }[]>;
   };
   windowControls: {
     minimize: () => void;
@@ -168,6 +178,7 @@ const electronAPI: ElectronAPI = {
     dismissSession: (sessionId) => ipcRenderer.invoke('upload:dismissSession', sessionId),
     getSessions: () => ipcRenderer.invoke('upload:getSessions'),
     hasActiveSessions: () => ipcRenderer.invoke('upload:hasActiveSessions'),
+    getActiveFiles: (galleryId) => ipcRenderer.invoke('upload:getActiveFiles', galleryId),
     getPendingSessions: () => ipcRenderer.invoke('upload:getPendingSessions'),
     dismissPendingSession: (sessionId) => ipcRenderer.invoke('upload:dismissPendingSession', sessionId),
     resumePendingSession: (sessionId, token) => ipcRenderer.invoke('upload:resumePendingSession', sessionId, token),
@@ -214,8 +225,8 @@ const electronAPI: ElectronAPI = {
     },
   },
   gallery: {
-    checkDuplicates: (galleryId, folderId, fileNames, token) =>
-      ipcRenderer.invoke('gallery:checkDuplicates', galleryId, folderId, fileNames, token),
+    checkDuplicates: (galleryId, fileNames, token) =>
+      ipcRenderer.invoke('gallery:checkDuplicates', galleryId, fileNames, token),
   },
   windowControls: {
     minimize: () => ipcRenderer.send('window:minimize'),

@@ -28,7 +28,7 @@ export interface UploadSessionInfo {
   errorMessage?: string;
 }
 
-type SessionFile = { path: string; name: string; size: number; type: string };
+type SessionFile = { path: string; name: string; size: number; type: string; replacePhotoId?: string };
 
 interface SessionEntry {
   queue: UploadQueue | null; // null while queued behind another session
@@ -245,6 +245,19 @@ export class UploadManager {
 
   getAllSessions(): UploadSessionInfo[] {
     return Array.from(this.sessions.values()).map((e) => ({ ...e.info }));
+  }
+
+  /** Files of a gallery that are still uploading or waiting to (for the duplicate check) */
+  getActiveFiles(galleryId: string): Array<{ name: string; size: number; folderId: string; folderName: string }> {
+    const result: Array<{ name: string; size: number; folderId: string; folderName: string }> = [];
+    for (const e of this.sessions.values()) {
+      if (e.info.galleryId !== galleryId) continue;
+      if (e.info.status !== 'uploading' && e.info.status !== 'queued') continue;
+      for (const f of e.files) {
+        result.push({ name: f.name, size: f.size, folderId: e.info.folderId, folderName: e.info.folderName });
+      }
+    }
+    return result;
   }
 
   /** True while any session is uploading or waiting to upload */

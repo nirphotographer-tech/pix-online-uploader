@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { checkFolder } from '../lib/folderCheck';
 import { onFoldersChanged } from '../lib/galleryChannel';
+import { supabase } from '../lib/supabase';
+import { classifyFiles, hasDuplicates, type DuplicateReport } from '../lib/duplicates';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'tiff', 'tif', 'heic', 'heif'];
 const SUPPORTED_FORMATS_DISPLAY = ['JPG', 'PNG', 'WebP', 'TIFF', 'HEIC'];
@@ -25,12 +27,6 @@ function getMimeType(name: string): string {
   return mimeMap[ext] || 'image/jpeg';
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 interface UploadScreenProps {
   galleryId: string;
   galleryName: string;
@@ -48,6 +44,8 @@ interface FileInfo {
   name: string;
   size: number;
   type: string;
+  /** "Replace" chosen: takes this existing photo's place */
+  replacePhotoId?: string;
 }
 
 interface RejectedFilesInfo {
@@ -57,8 +55,39 @@ interface RejectedFilesInfo {
 }
 
 interface DuplicateInfo {
-  duplicates: FileInfo[];
-  newFiles: FileInfo[];
+  report: DuplicateReport;
+  total: number;
+  /** folder id → name, for "already in folder X" */
+  folderNames: Map<string, string>;
+  /** Edited photos that clients marked as favorites; null = unknown */
+  favoritedCount: number | null;
+}
+
+/** Of these photos, how many has any client marked as a favorite (null = couldn't tell) */
+async function countFavorited(galleryId: string, photoIds: string[]): Promise<number | null> {
+  if (photoIds.length === 0) return 0;
+  try {
+    const { data: gallery } = await supabase.from('galleries').select('share_id').eq('id', galleryId).maybeSingle();
+    if (!gallery?.share_id) return null;
+    const marked = new Set<string>();
+    for (let i = 0; i < photoIds.length; i += 80) {
+      const { data, error } = await supabase
+        .from('favorites')
+        .select('photo_public_id')
+        .eq('gallery_id', gallery.share_id)
+        .in('photo_public_id', photoIds.slice(i, i + 80));
+      if (error) return null;
+      for (const row of data ?? []) marked.add(row.photo_public_id);
+    }
+    return marked.size;
+  } catch {
+    return null;
+  }
+}
+
+function namesPreview(files: FileInfo[]): string {
+  const names = files.slice(0, 3).map((f) => f.name).join(', ');
+  return files.length > 3 ? `${names} ועוד ${files.length - 3}` : names;
 }
 
 export default function UploadScreen({
@@ -77,6 +106,8 @@ export default function UploadScreen({
   const [rejectedFiles, setRejectedFiles] = useState<RejectedFilesInfo | null>(null);
   const [duplicateInfo, setDuplicateInfo] = useState<DuplicateInfo | null>(null);
   const [allPendingFiles, setAllPendingFiles] = useState<FileInfo[]>([]);
+  /** The duplicate check couldn't run — these files wait for the photographer's decision */
+  const [checkFailedFiles, setCheckFailedFiles] = useState<FileInfo[] | null>(null);
   const dragCounter = useRef(0);
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The folder can be renamed or deleted on the website while this screen is open
@@ -172,6 +203,7 @@ export default function UploadScreen({
     setStarting(true);
     setDuplicateInfo(null);
     setAllPendingFiles([]);
+    setCheckFailedFiles(null);
     try {
       // Last check right before starting — the folder may have been deleted on the site
       if (!(await verifyFolder())) return;
@@ -190,61 +222,37 @@ export default function UploadScreen({
     if (acceptedFiles.length === 0) return;
 
     setChecking(true);
+    setCheckFailedFiles(null);
     try {
-      const fileNames = acceptedFiles.map((f) => f.name);
-      const existingPhotos = await window.electronAPI.gallery.checkDuplicates(
-        galleryId, folderId, fileNames, token
-      );
+      // The whole gallery (a copy may sit in another folder) plus what's still uploading
+      const [existingPhotos, uploadingFiles] = await Promise.all([
+        window.electronAPI.gallery.checkDuplicates(galleryId, acceptedFiles.map((f) => f.name), token),
+        window.electronAPI.upload.getActiveFiles(galleryId),
+      ]);
 
-      if (existingPhotos.length === 0) {
-        // No duplicates — upload immediately
+      const report = classifyFiles(acceptedFiles, folderId, existingPhotos, uploadingFiles);
+      if (!hasDuplicates(report)) {
         autoUpload(acceptedFiles);
         return;
       }
 
-      // Match by file_name + size_bytes (if size is available in DB)
-      // Build a lookup: name → list of existing records
-      const existingByName = new Map<string, { id: string; size_bytes: number | null }[]>();
-      for (const p of existingPhotos) {
-        const list = existingByName.get(p.file_name) || [];
-        list.push({ id: p.id, size_bytes: p.size_bytes });
-        existingByName.set(p.file_name, list);
-      }
+      const [folderRows, favoritedCount] = await Promise.all([
+        report.inOtherFolders.size > 0
+          ? supabase.from('gallery_folders').select('id, name').eq('gallery_id', galleryId).then((r) => r.data ?? [])
+          : Promise.resolve([] as Array<{ id: string; name: string }>),
+        countFavorited(galleryId, report.edited.map((e) => e.photoId)),
+      ]);
 
-      const duplicates: FileInfo[] = [];
-      const newFiles: FileInfo[] = [];
-
-      for (const file of acceptedFiles) {
-        const matches = existingByName.get(file.name);
-        if (!matches || matches.length === 0) {
-          newFiles.push(file);
-          continue;
-        }
-
-        // Check if any match also has the same size (or size is null = legacy, treat as dup by name)
-        const isDuplicate = matches.some(
-          (m) => m.size_bytes === null || m.size_bytes === file.size
-        );
-
-        if (isDuplicate) {
-          duplicates.push(file);
-        } else {
-          // Same name but different size — likely a different/updated file, still flag as duplicate
-          // (user probably re-edited the photo — let them decide)
-          duplicates.push(file);
-        }
-      }
-
-      if (duplicates.length === 0) {
-        autoUpload(acceptedFiles);
-        return;
-      }
-
-      setDuplicateInfo({ duplicates, newFiles });
+      setDuplicateInfo({
+        report,
+        total: acceptedFiles.length,
+        folderNames: new Map(folderRows.map((f) => [f.id, f.name])),
+        favoritedCount,
+      });
       setAllPendingFiles(acceptedFiles);
     } catch (err) {
-      console.error('Duplicate check failed, uploading anyway:', err);
-      autoUpload(acceptedFiles);
+      console.error('Duplicate check failed:', err);
+      setCheckFailedFiles(acceptedFiles);
     } finally {
       setChecking(false);
     }
@@ -256,17 +264,25 @@ export default function UploadScreen({
   }, [allPendingFiles, autoUpload]);
 
   const handleSkipDuplicates = useCallback(() => {
-    if (duplicateInfo && duplicateInfo.newFiles.length > 0) {
-      autoUpload(duplicateInfo.newFiles);
+    if (duplicateInfo && duplicateInfo.report.newFiles.length > 0) {
+      autoUpload(duplicateInfo.report.newFiles);
     } else {
       setDuplicateInfo(null);
       setAllPendingFiles([]);
     }
   }, [duplicateInfo, autoUpload]);
 
+  /** Edited versions take the old photos' place; new files are added; copies are skipped */
+  const handleReplace = useCallback(() => {
+    if (!duplicateInfo) return;
+    const { newFiles, edited } = duplicateInfo.report;
+    autoUpload([...newFiles, ...edited.map((e) => ({ ...e.file, replacePhotoId: e.photoId }))]);
+  }, [duplicateInfo, autoUpload]);
+
   const handleCancelUpload = useCallback(() => {
     setDuplicateInfo(null);
     setAllPendingFiles([]);
+    setCheckFailedFiles(null);
   }, []);
 
   const handleAddFiles = useCallback(async () => {
@@ -425,98 +441,135 @@ export default function UploadScreen({
       )}
 
       {/* Duplicate files modal */}
-      {duplicateInfo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-dark-card border border-dark-border rounded-2xl shadow-2xl w-[420px] max-h-[80vh] flex flex-col mx-4 animate-slide-down">
-            {/* Modal header */}
-            <div className="px-5 pt-5 pb-4 border-b border-dark-border">
-              <div className="flex items-center gap-3 mb-2">
+      {duplicateInfo && (() => {
+        const { report, total, folderNames, favoritedCount } = duplicateInfo;
+        const newCount = report.newFiles.length;
+        const editedCount = report.edited.length;
+        const rows: Array<{ key: string; tone: 'new' | 'same' | 'edited' | 'busy'; label: string; files: FileInfo[] }> = [];
+        if (report.identical.length > 0) {
+          rows.push({ key: 'identical', tone: 'same', label: `${report.identical.length} כבר הועלו לתיקייה הזו`, files: report.identical });
+        }
+        if (editedCount > 0) {
+          rows.push({ key: 'edited', tone: 'edited', label: `${editedCount} בשם זהה לתמונות בתיקייה, אבל הקובץ שונה (כנראה עריכה חדשה)`, files: report.edited.map((e) => e.file) });
+        }
+        report.inOtherFolders.forEach((files, id) => {
+          rows.push({ key: `folder-${id}`, tone: 'same', label: `${files.length} כבר נמצאות בתיקייה "${folderNames.get(id) ?? 'אחרת'}"`, files });
+        });
+        report.uploading.forEach((files, name) => {
+          rows.push({ key: `busy-${name}`, tone: 'busy', label: `${files.length} עולות ממש עכשיו לתיקייה "${name}"`, files });
+        });
+        if (newCount > 0) {
+          rows.push({ key: 'new', tone: 'new', label: `${newCount} תמונות חדשות`, files: report.newFiles });
+        }
+        const dot = { new: 'bg-emerald-500', same: 'bg-amber-500', edited: 'bg-sky-500', busy: 'bg-violet-500' };
+        const skippedOnReplace = total - newCount - editedCount;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" dir="rtl">
+            <div className="bg-dark-card border border-dark-border rounded-2xl shadow-2xl w-full max-w-[460px] max-h-[85vh] flex flex-col mx-4 animate-slide-down">
+              {/* Header */}
+              <div className="px-5 pt-5 pb-4 border-b border-dark-border flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-amber-500/15 flex items-center justify-center flex-shrink-0">
-                  <svg className="w-5 h-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <svg className="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
                       d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
                   </svg>
                 </div>
                 <div>
-                  <h2 className="text-gray-900 text-base font-bold" dir="rtl">נמצאו קבצים כפולים</h2>
-                  <p className="text-gray-500 text-xs" dir="rtl">
-                    {duplicateInfo.duplicates.length === 1
-                      ? 'קובץ אחד כבר קיים בגלריה'
-                      : `${duplicateInfo.duplicates.length} קבצים כבר קיימים בגלריה`}
-                  </p>
+                  <h2 className="text-gray-900 text-base font-bold">חלק מהתמונות כבר בגלריה</h2>
+                  <p className="text-gray-500 text-xs">{total} תמונות נבחרו לתיקייה "{currentFolderName}"</p>
                 </div>
               </div>
-            </div>
 
-            {/* Duplicate file list */}
-            <div className="flex-1 overflow-y-auto px-5 py-3 min-h-0">
-              <div className="space-y-2">
-                {duplicateInfo.duplicates.slice(0, 10).map((file) => (
-                  <div key={file.path} className="flex items-center gap-3 px-3 py-2 rounded-lg bg-dark-bg/60 border border-amber-500/10">
-                    <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center flex-shrink-0">
-                      <svg className="w-4 h-4 text-amber-400/70" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5}
-                          d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                      </svg>
+              {/* What was found */}
+              <div className="flex-1 overflow-y-auto px-5 py-3 min-h-0 space-y-2">
+                {rows.map((row) => (
+                  <div key={row.key} className="px-3 py-2 rounded-lg bg-dark-bg/60 border border-dark-border/60">
+                    <div className="flex items-center gap-2">
+                      <span className={`w-2 h-2 rounded-full flex-shrink-0 ${dot[row.tone]}`} />
+                      <p className="text-gray-800 text-sm">{row.label}</p>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-gray-700 text-xs font-medium truncate">{file.name}</p>
-                      <p className="text-gray-600 text-[10px]">{formatFileSize(file.size)}</p>
-                    </div>
-                    <span className="text-[10px] text-amber-400/60 bg-amber-500/10 px-1.5 py-0.5 rounded">כפול</span>
+                    <p className="text-gray-500 text-[11px] mt-0.5 mr-4 truncate" dir="ltr" style={{ textAlign: 'right' }}>
+                      {namesPreview(row.files)}
+                    </p>
                   </div>
                 ))}
-                {duplicateInfo.duplicates.length > 10 && (
-                  <p className="text-gray-600 text-xs text-center py-1" dir="rtl">
-                    ועוד {duplicateInfo.duplicates.length - 10} קבצים כפולים...
-                  </p>
-                )}
               </div>
 
-              {/* Summary */}
-              <div className="mt-3 pt-3 border-t border-dark-border/50">
-                <div className="flex items-center justify-between text-xs" dir="rtl">
-                  <span className="text-gray-500">סה״כ קבצים:</span>
-                  <span className="text-gray-700">{allPendingFiles.length}</span>
-                </div>
-                <div className="flex items-center justify-between text-xs mt-1" dir="rtl">
-                  <span className="text-amber-400/70">כפולים:</span>
-                  <span className="text-amber-400">{duplicateInfo.duplicates.length}</span>
-                </div>
-                {duplicateInfo.newFiles.length > 0 && (
-                  <div className="flex items-center justify-between text-xs mt-1" dir="rtl">
-                    <span className="text-emerald-400/70">חדשים:</span>
-                    <span className="text-emerald-400">{duplicateInfo.newFiles.length}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Modal actions */}
-            <div className="px-5 py-4 border-t border-dark-border space-y-2">
-              {/* Upload all anyway */}
-              <button
-                onClick={handleUploadAll}
-                className="w-full py-2.5 bg-brand-primary hover:bg-brand-hover text-white text-sm rounded-md transition-all duration-200 font-semibold hover:shadow-lg hover:shadow-brand-primary/20"
-              >
-                העלו הכל בכל זאת ({allPendingFiles.length})
-              </button>
-
-              {/* Skip duplicates */}
-              {duplicateInfo.newFiles.length > 0 && (
+              {/* Choices */}
+              <div className="px-5 py-4 border-t border-dark-border space-y-2">
                 <button
                   onClick={handleSkipDuplicates}
-                  className="w-full py-2.5 bg-dark-bg border border-gray-400 text-gray-700 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/30 hover:text-gray-900 transition-all duration-200"
+                  className="w-full py-2.5 px-3 bg-brand-primary hover:bg-brand-hover text-white rounded-md transition-all duration-200 hover:shadow-lg hover:shadow-brand-primary/20 text-right"
                 >
-                  דלגו על כפולים, העלו רק חדשים ({duplicateInfo.newFiles.length})
+                  <span className="block text-sm font-semibold">
+                    {newCount > 0 ? `העלאת החדשות בלבד (${newCount})` : 'לא להעלות — הכל כבר קיים'}
+                  </span>
+                  <span className="block text-[11px] text-white/80">התמונות שכבר בגלריה יישארו כמו שהן</span>
                 </button>
-              )}
 
-              {/* Cancel */}
+                {editedCount > 0 && (
+                  <button
+                    onClick={handleReplace}
+                    className="w-full py-2.5 px-3 bg-dark-bg border border-sky-400/60 text-gray-800 rounded-md hover:bg-sky-50 hover:border-sky-500 transition-all duration-200 text-right"
+                  >
+                    <span className="block text-sm font-semibold">
+                      החלפה בגרסה החדשה ({editedCount}){newCount > 0 ? ` + העלאת ${newCount} חדשות` : ''}
+                    </span>
+                    <span className="block text-[11px] text-gray-600 leading-relaxed">
+                      כל תמונה חדשה תופיע במקום הישנה, באותו מקום בגלריה.{' '}
+                      {favoritedCount && favoritedCount > 0
+                        ? `${favoritedCount === 1 ? 'תמונה אחת מהן מסומנת' : `${favoritedCount} מהן מסומנות`} במועדפים של לקוחות. הסימון יוסר, כי זו כבר לא אותה תמונה שהם בחרו.`
+                        : favoritedCount === 0
+                          ? 'אף לקוח לא סימן אותן במועדפים.'
+                          : 'אם לקוח סימן אחת מהן במועדפים, הסימון יוסר.'}
+                      {skippedOnReplace > 0 ? ` ${skippedOnReplace} התמונות שכבר בגלריה או בהעלאה לא יועלו שוב.` : ''}
+                    </span>
+                  </button>
+                )}
+
+                <button
+                  onClick={handleUploadAll}
+                  className="w-full py-2.5 px-3 bg-dark-bg border border-gray-300 text-gray-700 rounded-md hover:bg-dark-hover hover:border-brand-primary/30 hover:text-gray-900 transition-all duration-200 text-right"
+                >
+                  <span className="block text-sm font-medium">העלאת הכל בנוסף לקיימות ({total})</span>
+                  <span className="block text-[11px] text-gray-500">התמונות יופיעו בגלריה פעמיים</span>
+                </button>
+
+                <button
+                  onClick={handleCancelUpload}
+                  className="w-full py-2 text-gray-500 text-xs hover:text-gray-800 transition-colors"
+                >
+                  ביטול
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* The duplicate check couldn't run */}
+      {checkFailedFiles && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" dir="rtl">
+          <div className="bg-dark-card border border-dark-border rounded-2xl shadow-2xl w-full max-w-[420px] mx-4 p-5 animate-slide-down">
+            <h2 className="text-gray-900 text-base font-bold mb-1">לא הצלחנו לבדוק כפילויות</h2>
+            <p className="text-gray-600 text-sm mb-4">
+              לא ברור אם {checkFailedFiles.length} התמונות כבר נמצאות בגלריה (כנראה בעיית חיבור).
+            </p>
+            <div className="space-y-2">
               <button
-                onClick={handleCancelUpload}
-                className="w-full py-2 text-gray-600 text-xs hover:text-gray-400 transition-colors"
+                onClick={() => checkAndUpload(checkFailedFiles)}
+                className="w-full py-2.5 bg-brand-primary hover:bg-brand-hover text-white text-sm font-semibold rounded-md transition-colors"
               >
+                לבדוק שוב
+              </button>
+              <button
+                onClick={() => autoUpload(checkFailedFiles)}
+                className="w-full py-2.5 bg-dark-bg border border-gray-300 text-gray-700 text-sm rounded-md hover:bg-dark-hover transition-colors"
+              >
+                להעלות בלי לבדוק
+              </button>
+              <button onClick={handleCancelUpload} className="w-full py-2 text-gray-500 text-xs hover:text-gray-800 transition-colors">
                 ביטול
               </button>
             </div>

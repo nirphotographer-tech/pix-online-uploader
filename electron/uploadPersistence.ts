@@ -16,6 +16,8 @@ export interface PersistedFile {
   name: string;
   size: number;
   type: string;
+  /** "Replace" chosen: the file takes this existing photo's place */
+  replacePhotoId?: string;
 }
 
 export interface DiskSession {
