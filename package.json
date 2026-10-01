@@ -41,7 +41,14 @@
       "icon": "pix-logo/icon.icns"
     },
     "win": {
-      "target": "nsis",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
       "icon": "pix-logo/icon.png"
     },
     "nsis": {
