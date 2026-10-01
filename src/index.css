@@ -68,10 +68,14 @@
   animation: slide-in 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* In the base layer: unlayered, it beat every Tailwind utility (Tailwind 4
+   puts them in layers), so no p-*, m-* or space-* class ever applied. */
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
 }
 
 html, body {
