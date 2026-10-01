@@ -475,7 +475,10 @@ function getUploadManager(): UploadManager {
       apiBaseUrl: API_BASE_URL,
       supabaseUrl: SUPABASE_URL,
       supabaseKey: SUPABASE_ANON_KEY,
-      concurrency: 3,
+      // Shared by all folders uploading at once. Saving no longer runs sharp on
+      // the server (instantSave), so it doesn't need the old 2-at-a-time limit.
+      concurrency: 6,
+      maxParallelSaves: 4,
       getToken: () => accessToken,
       refreshToken: requestFreshToken,
       onFileSettled: (sessionId, filePath, outcome) => markFileSettled(sessionId, filePath, outcome),
