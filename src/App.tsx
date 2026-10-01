@@ -3,11 +3,11 @@ import LoginScreen from './screens/LoginScreen';
 import GallerySelectScreen from './screens/GallerySelectScreen';
 import FolderSelectScreen, { type FolderItem } from './screens/FolderSelectScreen';
 import UploadScreen from './screens/UploadScreen';
+import UploadStatusBar from './components/UploadStatusBar';
 import { supabase } from './lib/supabase';
-import { runGalleryFaceScan } from './lib/face-scan';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.4.5';
+const APP_VERSION = '2.5.0';
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
@@ -40,6 +40,7 @@ export default function App() {
   const [cachedFolders, setCachedFolders] = useState<FolderItem[]>([]);
   // pendingSessions/resumingSession removed — auto-resume handles this silently
   const pendingDeepLinkRef = useRef<any>(null);
+  const broadcastFinalRef = useRef<((session: UploadSessionInfo) => void) | null>(null);
   const [screenTransition, setScreenTransition] = useState(false);
 
   // Screen transition helper
@@ -62,10 +63,12 @@ export default function App() {
       console.log(`[Resume] Auto-resuming ${sessions.length} interrupted session(s)`);
       for (const s of sessions) {
         try {
+          // Main drops sessions with nothing left by itself. Never dismiss here:
+          // 'already_running' means the session is live, and deleting its saved
+          // state made a later close/restart lose the upload.
           const result = await window.electronAPI.upload.resumePendingSession(s.sessionId, token);
           if (!result.resumed) {
-            await window.electronAPI.upload.dismissPendingSession(s.sessionId);
-            console.log(`[Resume] Session ${s.sessionId} discarded: ${result.reason}`);
+            console.log(`[Resume] Session ${s.sessionId} not resumed: ${result.reason}`);
           } else {
             console.log(`[Resume] Session ${s.sessionId} resumed with ${result.remainingCount} files`);
           }
@@ -96,6 +99,26 @@ export default function App() {
     window.addEventListener('online', handleOnline);
     return () => window.removeEventListener('online', handleOnline);
   }, [auth, autoResumeAll]);
+
+  // Keep the main process (uploads) and the saved session in sync with every
+  // token Supabase issues — auto-refresh rotates the refresh token, and a stale
+  // saved one logs the photographer out on the next launch.
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!session) return;
+      window.electronAPI.auth.setToken(session.access_token);
+      if (event === 'TOKEN_REFRESHED' || event === 'SIGNED_IN') {
+        window.electronAPI.store.setSession({
+          access_token: session.access_token,
+          refresh_token: session.refresh_token,
+          user_id: session.user.id,
+          email: session.user.email || '',
+        }).catch(() => {});
+      }
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
 
   // Restore session on mount
   useEffect(() => {
@@ -175,13 +198,18 @@ export default function App() {
 
     const lastCompletedFiles = new Map<string, number>();
 
-    const broadcastProgress = (session: UploadSessionInfo) => {
+    const latestSessions = new Map<string, UploadSessionInfo>();
+
+    const broadcastProgress = (session: UploadSessionInfo, force = false) => {
+      // The site only knows uploading/done/error; queued sessions show up once they start
+      if (session.status === 'queued') return;
+      latestSessions.set(session.sessionId, session);
       const now = Date.now();
       const last = lastBroadcast.get(session.sessionId) || 0;
       const isFinal = session.status === 'done' || session.status === 'error';
       const prevCompleted = lastCompletedFiles.get(session.sessionId) || 0;
       const fileJustCompleted = session.completedFiles > prevCompleted;
-      if (!isFinal && !fileJustCompleted && now - last < 1000) return;
+      if (!force && !isFinal && !fileJustCompleted && now - last < 1000) return;
       lastBroadcast.set(session.sessionId, now);
       lastCompletedFiles.set(session.sessionId, session.completedFiles);
 
@@ -208,7 +236,7 @@ export default function App() {
       }
     };
 
-    const unsubUpdate = window.electronAPI.upload.onSessionUpdate((session) => {
+    const upsertSession = (session: UploadSessionInfo) => {
       setUploadSessions((prev) => {
         const idx = prev.findIndex((s) => s.sessionId === session.sessionId);
         if (idx >= 0) {
@@ -218,58 +246,42 @@ export default function App() {
         }
         return [...prev, session];
       });
+    };
+
+    const unsubUpdate = window.electronAPI.upload.onSessionUpdate((session) => {
+      upsertSession(session);
       broadcastProgress(session);
     });
 
     const unsubComplete = window.electronAPI.upload.onSessionComplete((session) => {
-      setUploadSessions((prev) => {
-        const idx = prev.findIndex((s) => s.sessionId === session.sessionId);
-        if (idx >= 0) {
-          const updated = [...prev];
-          updated[idx] = session;
-          return updated;
-        }
-        return [...prev, session];
-      });
+      upsertSession(session);
       broadcastProgress(session);
-
-      // Trigger background face scan after successful upload
-      if (session.status === 'done') {
-        (async () => {
-          try {
-            const galleryId = session.galleryId;
-            // Fetch share_id from Supabase
-            const { data: galleryRow } = await supabase
-              .from('galleries')
-              .select('share_id')
-              .eq('id', galleryId)
-              .maybeSingle();
-            if (!galleryRow?.share_id) {
-              console.warn('[face-scan] Missing share_id for gallery', galleryId.substring(0, 8));
-              return;
-            }
-            // Fetch all photos for this gallery
-            const { data: photoRows } = await supabase
-              .from('photos')
-              .select('id, url')
-              .eq('gallery_id', galleryId);
-            if (!photoRows?.length) return;
-            const photos = photoRows
-              .filter((p) => p.id && p.url)
-              .map((p) => ({ id: String(p.id), url: p.url as string }));
-            console.log(`[face-scan] 🚀 Triggering post-upload scan: ${photos.length} photos`);
-            // Force=true so new uploads are always included in the scan
-            await runGalleryFaceScan(galleryRow.share_id, photos, { force: true });
-          } catch (err) {
-            console.warn('[face-scan] Post-upload scan failed (non-blocking):', err);
-          }
-        })();
-      }
     });
+
+    // Sessions that kept running while this window was closed/reloaded
+    window.electronAPI.upload.getSessions().then((sessions) => {
+      sessions.forEach(upsertSession);
+    }).catch(() => {});
+
+    // The site marks a session as stuck after 90s without news. Uploads can go
+    // quiet for longer (big file, retry back-off) — send a heartbeat meanwhile.
+    const heartbeat = setInterval(() => {
+      latestSessions.forEach((session) => {
+        if (session.status === 'uploading') broadcastProgress(session, true);
+      });
+    }, 30_000);
+
+    // Let the cancel button tell the site that the session ended
+    broadcastFinalRef.current = (session: UploadSessionInfo) => {
+      broadcastProgress({ ...session, status: 'done', speed: 0, eta: 0 }, true);
+      latestSessions.delete(session.sessionId);
+    };
 
     return () => {
       unsubUpdate();
       unsubComplete();
+      clearInterval(heartbeat);
+      broadcastFinalRef.current = null;
       channels.forEach((channel) => supabase.removeChannel(channel));
     };
   }, []);
@@ -433,6 +445,30 @@ export default function App() {
   }, [navigateTo]);
 
 
+  const handleCancelSession = useCallback(async (sessionId: string) => {
+    const session = uploadSessions.find((s) => s.sessionId === sessionId);
+    if (!window.confirm('לעצור את ההעלאה? תמונות שכבר עלו יישארו בגלריה.')) return;
+    await window.electronAPI.upload.cancelSession(sessionId);
+    if (session) broadcastFinalRef.current?.(session);
+    setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+  }, [uploadSessions]);
+
+  const handleDismissSession = useCallback(async (sessionId: string) => {
+    await window.electronAPI.upload.dismissSession(sessionId);
+    setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
+  }, []);
+
+  const handleRetrySession = useCallback(async (sessionId: string) => {
+    if (!auth) return;
+    const result = await window.electronAPI.upload.resumePendingSession(sessionId, auth.token);
+    if (!result.resumed) {
+      console.log(`[Retry] Session ${sessionId} not resumed: ${result.reason}`);
+      if (result.reason === 'files_not_found') {
+        window.alert('הקבצים שנכשלו כבר לא נמצאים במחשב (הועברו או נמחקו).');
+      }
+    }
+  }, [auth]);
+
   if (loading) {
     return (
       <div className="flex flex-col items-center justify-center h-screen bg-dark-bg gap-3">
@@ -476,7 +512,7 @@ export default function App() {
 
       {/* Main content area with transition */}
       <div
-        className={`flex-1 h-full overflow-visible transition-opacity duration-150 ${
+        className={`flex-1 min-h-0 overflow-hidden transition-opacity duration-150 ${
           screenTransition ? 'opacity-0' : 'opacity-100'
         }`}
       >
@@ -518,7 +554,14 @@ export default function App() {
         )}
       </div>
 
-
+      {screen !== 'login' && (
+        <UploadStatusBar
+          sessions={uploadSessions}
+          onCancel={handleCancelSession}
+          onDismiss={handleDismissSession}
+          onRetry={handleRetrySession}
+        />
+      )}
 
       {/* Version number */}
       <div className="fixed bottom-2 left-2 text-[10px] text-black/30 select-none pointer-events-none">

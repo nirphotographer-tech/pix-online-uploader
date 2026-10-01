@@ -5,6 +5,7 @@ import {
   dialog,
   Notification,
   powerSaveBlocker,
+  powerMonitor,
 } from 'electron';
 import path from 'path';
 import fs from 'fs';
@@ -12,11 +13,13 @@ import Store from 'electron-store';
 import { UploadManager, UploadSessionInfo } from './uploadManager';
 import {
   saveSession,
-  markFileCompleted,
+  markFileSettled,
   removeSession as removePersistSession,
   loadPendingSessions,
   getRemainingFiles,
+  getSession as getPersistedSession,
   clearAllSessions,
+  flushPersistence,
   PersistedFile,
 } from './uploadPersistence';
 
@@ -53,11 +56,35 @@ function getFileInfo(filePath: string): { path: string; name: string; size: numb
   return { path: filePath, name, size: stat.size, type: mimeMap[ext] || 'image/jpeg' };
 }
 
+/** Like getFileInfo, but drops files that vanished or can't be read */
+function getFileInfos(filePaths: string[]): ReturnType<typeof getFileInfo>[] {
+  const result: ReturnType<typeof getFileInfo>[] = [];
+  for (const p of filePaths) {
+    try {
+      const info = getFileInfo(p);
+      if (info.size > 0) result.push(info);
+    } catch (err) {
+      console.warn('[Files] Cannot stat file, skipping:', p, err);
+    }
+  }
+  return result;
+}
+
+/**
+ * Hidden entries are never photos: macOS writes "._DSC0001.jpg" AppleDouble
+ * files next to every photo on exFAT/FAT memory cards and external drives, and
+ * they carry the .jpg extension.
+ */
+function isHiddenEntry(name: string): boolean {
+  return name.startsWith('.') || name === '__MACOSX' || name === '$RECYCLE.BIN' || name === 'System Volume Information';
+}
+
 function scanFolderForImages(dirPath: string): string[] {
   const results: string[] = [];
   try {
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     for (const entry of entries) {
+      if (isHiddenEntry(entry.name)) continue;
       const fullPath = path.join(dirPath, entry.name);
       if (entry.isDirectory()) {
         results.push(...scanFolderForImages(fullPath));
@@ -91,25 +118,40 @@ let powerSaveId: number | null = null;
 let uploadManager: UploadManager | null = null;
 let pendingDeepLinkUrl: string | null = null;
 
-// Token refresh: renderer sends fresh tokens here when requested
-let tokenRefreshResolve: ((token: string) => void) | null = null;
+// ── Auth token ──
+// The renderer owns the Supabase session and pushes every new access token
+// here (login, auto-refresh, restore). Upload queues always read the newest
+// one, so a long upload never keeps using an expired token.
+let accessToken = '';
+let refreshInFlight: Promise<string> | null = null;
+let refreshResolve: ((token: string) => void) | null = null;
 
-function requestFreshToken(): Promise<string> {
-  return new Promise((resolve) => {
-    tokenRefreshResolve = resolve;
-    // Ask the renderer to refresh the token via Supabase
-    mainWindow?.webContents.send('auth:refreshTokenRequest');
-    // Timeout after 10s
-    setTimeout(() => {
-      if (tokenRefreshResolve === resolve) {
-        tokenRefreshResolve = null;
-        resolve(''); // empty = refresh failed
-      }
-    }, 10000);
-  });
+function setAccessToken(token: string): void {
+  if (token) accessToken = token;
 }
 
-// Token refresh: renderer sends fresh tokens here when requested
+/**
+ * Ask the renderer to refresh the session. Concurrent callers (several upload
+ * sessions hitting 401 together) share one request — previously each call
+ * replaced the last one's resolver, so all but one waited 10s and gave up.
+ */
+function requestFreshToken(): Promise<string> {
+  if (refreshInFlight) return refreshInFlight;
+  if (!mainWindow || mainWindow.isDestroyed()) return Promise.resolve('');
+  refreshInFlight = new Promise<string>((resolve) => {
+    const timer = setTimeout(() => finish(''), 20_000);
+    function finish(token: string) {
+      clearTimeout(timer);
+      refreshResolve = null;
+      refreshInFlight = null;
+      setAccessToken(token);
+      resolve(token);
+    }
+    refreshResolve = finish;
+    mainWindow!.webContents.send('auth:refreshTokenRequest');
+  });
+  return refreshInFlight;
+}
 
 const isDev = process.argv.includes('--dev');
 const API_BASE_URL = process.env.VITE_API_BASE_URL || 'https://www.pix-online.com';
@@ -160,9 +202,47 @@ function createWindow(): void {
     fileLog('[RENDERER] dom-ready ✓');
   });
 
+  // Closing the window mid-upload must not silently kill the upload
+  mainWindow.on('close', (event) => {
+    if (isQuitting || !uploadManager?.hasActiveSessions()) return;
+    if (process.platform === 'darwin') {
+      // macOS convention: the app keeps running; uploads continue in the background
+      event.preventDefault();
+      mainWindow?.hide();
+      return;
+    }
+    const choice = dialog.showMessageBoxSync(mainWindow!, {
+      type: 'warning',
+      buttons: ['המשך להעלות ברקע', 'עצור וסגור'],
+      defaultId: 0,
+      cancelId: 0,
+      title: 'יש העלאה פעילה',
+      message: 'יש העלאה פעילה',
+      detail: 'אם תסגרו עכשיו ההעלאה תיעצר, ותמשיך אוטומטית בפעם הבאה שתפתחו את התוכנה.',
+    });
+    if (choice === 0) {
+      event.preventDefault();
+      mainWindow?.minimize();
+    } else {
+      isQuitting = true;
+    }
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+}
+
+let isQuitting = false;
+
+function showMainWindow(): void {
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
 }
 
 // Deep link support
@@ -182,10 +262,7 @@ if (!gotTheLock) {
   app.quit();
 } else {
   app.on('second-instance', (_event, commandLine) => {
-    if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    if (mainWindow) showMainWindow();
     const deepLink = commandLine.find((arg) => arg.startsWith('pix-uploader://'));
     if (deepLink) {
       handleDeepLink(deepLink);
@@ -244,10 +321,42 @@ app.whenReady().then(() => {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
+    showMainWindow();
+  });
+
+  // Lid closed / computer asleep: requests in flight hang until their timeout.
+  // On wake, restart them right away and refresh the (likely expired) token.
+  powerMonitor.on('suspend', () => console.log('[Power] 💤 System suspending'));
+  powerMonitor.on('resume', () => {
+    console.log('[Power] ☀️ System resumed');
+    if (uploadManager?.hasActiveSessions()) {
+      requestFreshToken().finally(() => uploadManager?.onSystemResume());
     }
   });
+  // Shutdown / restart must not be blocked by the "upload in progress" prompt
+  powerMonitor.on('shutdown', () => {
+    isQuitting = true;
+    flushPersistence();
+  });
+});
+
+app.on('before-quit', (event) => {
+  if (!isQuitting && uploadManager?.hasActiveSessions()) {
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      buttons: ['המשך להעלות', 'עצור וצא'],
+      defaultId: 0,
+      cancelId: 0,
+      message: 'יש העלאה פעילה',
+      detail: 'אם תצאו עכשיו ההעלאה תיעצר, ותמשיך אוטומטית בפעם הבאה שתפתחו את התוכנה.',
+    });
+    if (choice === 0) {
+      event.preventDefault();
+      return;
+    }
+  }
+  isQuitting = true;
+  flushPersistence();
 });
 
 app.on('window-all-closed', () => {
@@ -283,7 +392,7 @@ ipcMain.handle('dialog:openFiles', async () => {
       },
     ],
   });
-  return result.filePaths.map(getFileInfo);
+  return getFileInfos(result.filePaths);
 });
 
 ipcMain.handle('dialog:openFolder', async () => {
@@ -292,8 +401,7 @@ ipcMain.handle('dialog:openFolder', async () => {
     properties: ['openDirectory'],
   });
   if (result.filePaths.length === 0) return [];
-  const imagePaths = scanFolderForImages(result.filePaths[0]);
-  return imagePaths.map(getFileInfo);
+  return getFileInfos(scanFolderForImages(result.filePaths[0]));
 });
 
 ipcMain.handle('dialog:resolveDroppedFiles', (_event, filePaths: string[]) => {
@@ -308,7 +416,7 @@ ipcMain.handle('dialog:resolveDroppedFiles', (_event, filePaths: string[]) => {
         const found = scanFolderForImages(p);
         fileLog(`[DROP-IPC] folder scan found ${found.length} images in ${p}`);
         resolved.push(...found);
-      } else if (imageExts.has(path.extname(p).toLowerCase())) {
+      } else if (imageExts.has(path.extname(p).toLowerCase()) && !isHiddenEntry(path.basename(p))) {
         resolved.push(p);
       } else {
         fileLog(`[DROP-IPC] skipped (not image, not dir): ${p}`);
@@ -318,7 +426,7 @@ ipcMain.handle('dialog:resolveDroppedFiles', (_event, filePaths: string[]) => {
     }
   }
   fileLog(`[DROP-IPC] returning ${resolved.length} files`);
-  return resolved.map(getFileInfo);
+  return getFileInfos(resolved);
 });
 
 // Write dropped files (received as ArrayBuffer when file.path is unavailable) to OS temp dir
@@ -368,22 +476,27 @@ function getUploadManager(): UploadManager {
       supabaseUrl: SUPABASE_URL,
       supabaseKey: SUPABASE_ANON_KEY,
       concurrency: 3,
-      tokenRefresher: requestFreshToken,
+      getToken: () => accessToken,
+      refreshToken: requestFreshToken,
+      onFileSettled: (sessionId, filePath, outcome) => markFileSettled(sessionId, filePath, outcome),
       onSessionUpdate: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionUpdate', session);
       },
       onSessionComplete: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionComplete', session);
-        // Remove from persistence — session finished
-        removePersistSession(session.sessionId);
-        // Show notification
+        // Keep the session on disk only if some files can still be retried
+        if (getRemainingFiles(session.sessionId).length === 0) {
+          removePersistSession(session.sessionId);
+        } else {
+          flushPersistence();
+        }
         const msg = session.errorMessage
           ? session.errorMessage
           : session.failedFiles > 0
             ? `${session.completedFiles} מתוך ${session.totalFiles} תמונות הועלו בהצלחה`
             : `${session.completedFiles} תמונות הועלו בהצלחה`;
         new Notification({
-          title: session.errorMessage ? 'חריגה ממכסת אחסון' : `${session.galleryName} – ההעלאה הסתיימה`,
+          title: session.errorMessage ? 'ההעלאה נעצרה' : `${session.galleryName} – ההעלאה הסתיימה`,
           body: msg,
         }).show();
       },
@@ -400,6 +513,12 @@ function getUploadManager(): UploadManager {
   return uploadManager;
 }
 
+function preventSleep(): void {
+  if (powerSaveId === null) {
+    powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
+  }
+}
+
 ipcMain.handle(
   'upload:startSession',
   async (
@@ -412,40 +531,24 @@ ipcMain.handle(
     folderName: string,
     token: string
   ) => {
-    // Prevent sleep while uploading
-    if (powerSaveId === null) {
-      powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
-    }
+    setAccessToken(token);
+    preventSleep();
 
     // Resolve file sizes from disk if missing
     const resolvedFiles = files.map((f) => {
       if (!f.size || f.size === 0) {
         try {
-          const stat = fs.statSync(f.path);
-          return { ...f, size: stat.size };
+          return { ...f, size: fs.statSync(f.path).size };
         } catch {
           console.error(`[Upload] Cannot stat file: ${f.path}`);
-          return f;
         }
       }
       return f;
     });
 
-    const manager = getUploadManager();
-    manager.startSession(
-      sessionId,
-      resolvedFiles,
-      galleryId,
-      galleryName,
-      folderId,
-      folderName,
-      token,
-      // per-file completion callback for persistence
-      (fileName: string) => markFileCompleted(sessionId, fileName)
-    );
-
-    // Persist session to disk so it can be resumed after restart
+    // Persist first, so even an immediate crash can be resumed
     saveSession(sessionId, galleryId, galleryName, folderId, folderName, resolvedFiles as PersistedFile[]);
+    getUploadManager().startSession(sessionId, resolvedFiles, galleryId, galleryName, folderId, folderName);
   }
 );
 
@@ -457,6 +560,8 @@ ipcMain.handle('upload:cancelSession', (_event, sessionId: string) => {
 
 ipcMain.handle('upload:dismissSession', (_event, sessionId: string) => {
   uploadManager?.dismissSession(sessionId);
+  // Dismissing a finished session also gives up on its failed files
+  if (!uploadManager?.getSession(sessionId)) removePersistSession(sessionId);
 });
 
 ipcMain.handle('upload:getSessions', () => {
@@ -478,13 +583,13 @@ ipcMain.handle('config:getApiBaseUrl', () => {
 
 // Token refresh IPC
 ipcMain.on('auth:freshToken', (_event, token: string) => {
-  if (tokenRefreshResolve) {
-    tokenRefreshResolve(token);
-    tokenRefreshResolve = null;
-  }
+  if (refreshResolve) refreshResolve(token);
+  else setAccessToken(token);
 });
 
-// Token refresh IPC
+ipcMain.on('auth:setToken', (_event, token: string) => {
+  setAccessToken(token);
+});
 
 // Duplicate check: query existing photos in gallery by file_name + size_bytes
 ipcMain.handle(
@@ -496,38 +601,38 @@ ipcMain.handle(
     fileNames: string[],
     token: string
   ): Promise<{ file_name: string; id: string; size_bytes: number | null }[]> => {
+    if (fileNames.length === 0) return [];
+    // Small batches: one URL with thousands of names exceeds URL limits and the
+    // whole check silently failed for big folders.
+    const BATCH = 80;
+    // PostgREST in-list: quote every value, escape backslashes and quotes
+    const quote = (n: string) => `"${n.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+    const rows: { id: string; file_name: string; size_bytes: number | null }[] = [];
     try {
-      if (fileNames.length === 0) return [];
+      for (let i = 0; i < fileNames.length; i += BATCH) {
+        const batch = Array.from(new Set(fileNames.slice(i, i + BATCH)));
+        const namesParam = `(${batch.map(quote).join(',')})`;
+        let url = `${SUPABASE_URL}/rest/v1/gallery_photos?gallery_id=eq.${encodeURIComponent(galleryId)}&file_name=in.${encodeURIComponent(namesParam)}&select=id,file_name,size_bytes`;
+        if (folderId) url += `&folder_id=eq.${encodeURIComponent(folderId)}`;
 
-      // Build filter: gallery_id + file_name in list
-      // Supabase REST API supports `in` operator
-      const namesParam = `(${fileNames.map((n) => `"${n}"`).join(',')})`;
-      let url = `${SUPABASE_URL}/rest/v1/gallery_photos?gallery_id=eq.${galleryId}&file_name=in.${encodeURIComponent(namesParam)}&select=id,file_name,size_bytes`;
-
-      // Add folder filter if not the default "full gallery" folder
-      if (folderId) {
-        url += `&folder_id=eq.${folderId}`;
+        const res = await fetch(url, {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${token || accessToken}`,
+          },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (!res.ok) {
+          console.warn(`[DupCheck] HTTP ${res.status}: ${await res.text()}`);
+          continue; // On error, allow upload (don't block)
+        }
+        rows.push(...((await res.json()) as typeof rows));
       }
-
-      const res = await fetch(url, {
-        headers: {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${token}`,
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (!res.ok) {
-        console.warn(`[DupCheck] HTTP ${res.status}: ${await res.text()}`);
-        return []; // On error, allow upload (don't block)
-      }
-
-      const rows = (await res.json()) as { id: string; file_name: string; size_bytes: number | null }[];
       console.log(`[DupCheck] Found ${rows.length} existing photos matching ${fileNames.length} file names`);
       return rows;
     } catch (err) {
       console.warn('[DupCheck] Error:', err);
-      return []; // On error, allow upload
+      return rows; // On error, allow upload
     }
   }
 );
@@ -553,54 +658,37 @@ ipcMain.handle(
     sessionId: string,
     token: string
   ) => {
-    const remaining = getRemainingFiles(sessionId);
-    if (remaining.length === 0) {
-      removePersistSession(sessionId);
-      return { resumed: false, reason: 'no_remaining_files' };
+    setAccessToken(token);
+    const persisted = getPersistedSession(sessionId);
+    if (!persisted) return { resumed: false, reason: 'session_not_found' };
+
+    // Already running in memory (e.g. 'online' fired while it retries) — leave it alone
+    const manager = getUploadManager();
+    const live = manager.getSession(sessionId);
+    if (live && (live.status === 'uploading' || live.status === 'queued')) {
+      return { resumed: false, reason: 'already_running' };
     }
 
-    // Check which files still exist on disk
+    const remaining = getRemainingFiles(sessionId);
+    // Files deleted/moved since — mark them skipped so they don't block the session forever
     const existingFiles = remaining.filter((f) => {
-      try { fs.statSync(f.path); return true; } catch { return false; }
+      try { fs.statSync(f.path); return true; } catch {
+        markFileSettled(sessionId, f.path, 'skipped');
+        return false;
+      }
     });
 
     if (existingFiles.length === 0) {
       removePersistSession(sessionId);
-      return { resumed: false, reason: 'files_not_found' };
+      return { resumed: false, reason: remaining.length === 0 ? 'no_remaining_files' : 'files_not_found' };
     }
 
-    // Prevent sleep while uploading
-    if (powerSaveId === null) {
-      powerSaveId = powerSaveBlocker.start('prevent-app-suspension');
-    }
-
-    const manager = getUploadManager();
-
-    // Get gallery/folder info from persisted session first (needed for duplicate check)
-    const sessions = loadPendingSessions();
-    const persisted = sessions.find((s) => s.sessionId === sessionId);
-    if (!persisted) return { resumed: false, reason: 'session_not_found' };
-
-    // ⚠️ Anti-double-upload guard: if the same folder is already uploading in
-    // memory (e.g. this was triggered by the 'online' event while retries are
-    // still running), skip — the in-memory queue will recover on its own now
-    // that the network is back (waitForNetwork in uploadQueue).
-    const activeSessions = manager.getAllSessions();
-    const folderAlreadyActive = activeSessions.some(
-      (s) => s.folderId === persisted.folderId &&
-              s.galleryId === persisted.galleryId &&
-              s.status === 'uploading'
-    );
-    if (folderAlreadyActive) {
-      console.log(`[Resume] Skipping resume for ${sessionId} — folder ${persisted.folderId} already uploading in memory`);
-      return { resumed: false, reason: 'already_running' };
-    }
+    preventSleep();
 
     // Keep the ORIGINAL sessionId so the website sees the same session
     // continuing (same Realtime broadcast key) instead of a brand-new one.
-    const alreadyCompleted = persisted.completedFileNames.length;
-    const originalTotal = persisted.totalFiles;
-
+    const alreadyCompleted = persisted.completedPaths.length;
+    const alreadyFailed = persisted.skippedPaths.length;
     manager.startSession(
       sessionId,
       existingFiles,
@@ -608,16 +696,10 @@ ipcMain.handle(
       persisted.galleryName,
       persisted.folderId,
       persisted.folderName,
-      token,
-      (fileName: string) => markFileCompleted(sessionId, fileName),
-      alreadyCompleted,
-      originalTotal
+      { alreadyCompleted, alreadyFailed, originalTotal: persisted.totalFiles }
     );
 
-    // Update persisted session — keep same sessionId, preserve completed list + original total
-    saveSession(sessionId, persisted.galleryId, persisted.galleryName, persisted.folderId, persisted.folderName, existingFiles as PersistedFile[], { preserveCompleted: true, originalTotal });
-
-    console.log(`[Resume] Resumed session ${sessionId} with ${existingFiles.length} remaining files (${alreadyCompleted}/${originalTotal} already done)`);
+    console.log(`[Resume] Resumed session ${sessionId} with ${existingFiles.length} remaining files (${alreadyCompleted}/${persisted.totalFiles} already done)`);
     return { resumed: true, newSessionId: sessionId, remainingCount: existingFiles.length };
   }
 );

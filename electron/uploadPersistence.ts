@@ -1,6 +1,10 @@
 /**
  * Upload Persistence — saves active upload sessions to disk.
- * When the app is closed mid-upload and restarted, the user can resume.
+ * When the app is closed mid-upload (or the computer restarts), the session is
+ * resumed on the next launch, skipping files that were already uploaded.
+ *
+ * Files are tracked by full path, not name: a folder scan often contains the
+ * same camera file name (DSC_0001.jpg) in several sub-folders.
  */
 
 import { app } from 'electron';
@@ -14,49 +18,111 @@ export interface PersistedFile {
   type: string;
 }
 
-export interface PersistedSession {
+export interface DiskSession {
   sessionId: string;
   galleryId: string;
   galleryName: string;
   folderId: string;
   folderName: string;
   files: PersistedFile[];
-  completedFileNames: Set<string> | string[]; // string[] on disk, Set in memory
+  /** Uploaded successfully */
+  completedPaths: string[];
+  /** Failed for good (bad file, rejected by the server) — not retried */
+  skippedPaths: string[];
   totalFiles: number;
   startedAt: number;
 }
 
-type DiskSession = Omit<PersistedSession, 'completedFileNames'> & {
-  completedFileNames: string[];
-};
+/** Shape sent to the renderer */
+export interface PendingSessionSummary {
+  sessionId: string;
+  galleryId: string;
+  galleryName: string;
+  folderId: string;
+  folderName: string;
+  totalFiles: number;
+  completedCount: number;
+  remainingCount: number;
+  startedAt: number;
+}
 
 type PersistedStore = Record<string, DiskSession>;
+
+let cache: PersistedStore | null = null;
+let writeTimer: ReturnType<typeof setTimeout> | null = null;
 
 function getStorePath(): string {
   return path.join(app.getPath('userData'), 'pending-uploads.json');
 }
 
-function readStore(): PersistedStore {
-  try {
-    const raw = fs.readFileSync(getStorePath(), 'utf-8');
-    const parsed = JSON.parse(raw) as PersistedStore;
-    // Self-heal: old format was { "sessions": [] } — reset to empty object
-    if (Array.isArray(parsed) || ('sessions' in parsed && !('sessionId' in parsed))) {
-      writeStore({});
-      return {};
-    }
-    return parsed;
-  } catch {
-    return {};
+/** v2.4.x stored completed file *names*; convert to paths */
+function migrate(raw: Record<string, unknown>): DiskSession | null {
+  const s = raw as Partial<DiskSession> & { completedFileNames?: string[] };
+  if (!s || typeof s !== 'object' || typeof s.sessionId !== 'string' || !Array.isArray(s.files)) return null;
+  if (Array.isArray(s.completedPaths)) {
+    return { ...s, skippedPaths: Array.isArray(s.skippedPaths) ? s.skippedPaths : [] } as DiskSession;
   }
+  const doneNames = new Set(s.completedFileNames || []);
+  return {
+    sessionId: s.sessionId,
+    galleryId: s.galleryId || '',
+    galleryName: s.galleryName || '',
+    folderId: s.folderId || '',
+    folderName: s.folderName || '',
+    files: s.files,
+    completedPaths: s.files.filter((f) => doneNames.has(f.name)).map((f) => f.path),
+    skippedPaths: [],
+    totalFiles: s.totalFiles || s.files.length,
+    startedAt: s.startedAt || Date.now(),
+  };
 }
 
-function writeStore(store: PersistedStore): void {
+function readStore(): PersistedStore {
+  if (cache) return cache;
+  cache = {};
   try {
-    fs.writeFileSync(getStorePath(), JSON.stringify(store, null, 2), 'utf-8');
+    const parsed = JSON.parse(fs.readFileSync(getStorePath(), 'utf-8')) as Record<string, Record<string, unknown>>;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      for (const [id, raw] of Object.entries(parsed)) {
+        const session = migrate(raw);
+        if (session) cache[id] = session;
+      }
+    }
+  } catch {
+    // Missing or unreadable file → start empty
+  }
+  return cache;
+}
+
+/**
+ * Write atomically (temp file + rename): a crash, forced quit or power loss
+ * mid-write must never leave a truncated JSON that loses every pending session.
+ */
+function writeNow(): void {
+  if (writeTimer) {
+    clearTimeout(writeTimer);
+    writeTimer = null;
+  }
+  if (!cache) return;
+  const target = getStorePath();
+  const tmp = `${target}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(cache), 'utf-8');
+    fs.renameSync(tmp, target);
   } catch (err) {
     console.error('[Persistence] Failed to write store:', err);
   }
+}
+
+/** Per-file updates are frequent — batch them */
+function scheduleWrite(): void {
+  if (writeTimer) return;
+  writeTimer = setTimeout(writeNow, 1000);
+}
+
+/** Write pending changes immediately (call before the app quits) */
+export function flushPersistence(): void {
+  if (writeTimer) writeNow();
 }
 
 /** Save a new session to disk when upload starts */
@@ -67,36 +133,32 @@ export function saveSession(
   folderId: string,
   folderName: string,
   files: PersistedFile[],
-  options?: { preserveCompleted?: boolean; originalTotal?: number }
 ): void {
   const store = readStore();
-  const existing = store[sessionId];
-  const completedFileNames =
-    options?.preserveCompleted && existing ? existing.completedFileNames : [];
-  const totalFiles = options?.originalTotal ?? files.length;
   store[sessionId] = {
     sessionId,
     galleryId,
     galleryName,
     folderId,
     folderName,
-    files,
-    completedFileNames,
-    totalFiles,
-    startedAt: existing?.startedAt ?? Date.now(),
+    files: files.map(({ path: p, name, size, type }) => ({ path: p, name, size, type })),
+    completedPaths: [],
+    skippedPaths: [],
+    totalFiles: files.length,
+    startedAt: Date.now(),
   };
-  writeStore(store);
-  console.log(`[Persistence] Saved session ${sessionId} (${files.length} remaining, ${completedFileNames.length} already done, ${totalFiles} total)`);
+  writeNow();
+  console.log(`[Persistence] Saved session ${sessionId} (${files.length} files)`);
 }
 
-/** Mark a file as completed so we don't re-upload it on resume */
-export function markFileCompleted(sessionId: string, fileName: string): void {
-  const store = readStore();
-  const session = store[sessionId];
+/** Record a file's final outcome so it isn't uploaded again on resume */
+export function markFileSettled(sessionId: string, filePath: string, outcome: 'completed' | 'skipped'): void {
+  const session = readStore()[sessionId];
   if (!session) return;
-  if (!session.completedFileNames.includes(fileName)) {
-    session.completedFileNames.push(fileName);
-    writeStore(store);
+  const list = outcome === 'completed' ? session.completedPaths : session.skippedPaths;
+  if (!list.includes(filePath)) {
+    list.push(filePath);
+    scheduleWrite();
   }
 }
 
@@ -105,34 +167,39 @@ export function removeSession(sessionId: string): void {
   const store = readStore();
   if (store[sessionId]) {
     delete store[sessionId];
-    writeStore(store);
+    writeNow();
     console.log(`[Persistence] Removed session ${sessionId}`);
   }
 }
 
-/** Load all sessions that were interrupted (not yet completed) */
-export function loadPendingSessions(): DiskSession[] {
-  const store = readStore();
-  // Filter out malformed entries (e.g. from old format { "sessions": [] })
-  return Object.values(store).filter(
-    (s): s is DiskSession =>
-      s !== null &&
-      typeof s === 'object' &&
-      !Array.isArray(s) &&
-      typeof (s as DiskSession).sessionId === 'string' &&
-      Array.isArray((s as DiskSession).completedFileNames),
-  );
+export function getSession(sessionId: string): DiskSession | undefined {
+  return readStore()[sessionId];
 }
 
-/** Get remaining (not yet completed) files for a session */
+/** Files of a session that still need uploading */
 export function getRemainingFiles(sessionId: string): PersistedFile[] {
-  const store = readStore();
-  const session = store[sessionId];
+  const session = readStore()[sessionId];
   if (!session) return [];
-  const done = new Set(session.completedFileNames);
-  return session.files.filter((f) => !done.has(f.name));
+  const settled = new Set([...session.completedPaths, ...session.skippedPaths]);
+  return session.files.filter((f) => !settled.has(f.path));
+}
+
+/** Load all sessions that still have files to upload */
+export function loadPendingSessions(): PendingSessionSummary[] {
+  return Object.values(readStore()).map((s) => ({
+    sessionId: s.sessionId,
+    galleryId: s.galleryId,
+    galleryName: s.galleryName,
+    folderId: s.folderId,
+    folderName: s.folderName,
+    totalFiles: s.totalFiles,
+    completedCount: s.completedPaths.length,
+    remainingCount: getRemainingFiles(s.sessionId).length,
+    startedAt: s.startedAt,
+  }));
 }
 
 export function clearAllSessions(): void {
-  writeStore({});
+  cache = {};
+  writeNow();
 }

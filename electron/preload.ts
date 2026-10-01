@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 export interface UploadFileInfo {
   path: string;
@@ -16,12 +16,14 @@ export interface UploadSessionInfo {
   totalFiles: number;
   completedFiles: number;
   failedFiles: number;
+  /** Failed files worth retrying (network/server errors) */
+  retryableFiles: number;
   totalSize: number;
   totalLoaded: number;
   percentage: number;
   speed: number;
   eta: number;
-  status: 'uploading' | 'done' | 'error';
+  status: 'queued' | 'uploading' | 'done' | 'error';
   errorMessage?: string;
 }
 
@@ -40,7 +42,8 @@ export interface PersistedSessionInfo {
   folderId: string;
   folderName: string;
   totalFiles: number;
-  completedFileNames: string[];
+  completedCount: number;
+  remainingCount: number;
   startedAt: number;
 }
 
@@ -65,6 +68,8 @@ export interface ElectronAPI {
     openFolder: () => Promise<UploadFileInfo[]>;
     resolveDroppedFiles: (filePaths: string[]) => Promise<UploadFileInfo[]>;
     writeFilesToTemp: (files: Array<{ name: string; buffer: ArrayBuffer }>) => Promise<UploadFileInfo[]>;
+    /** Real path of a dropped File (File.path was removed in Electron 32) */
+    getPathForFile: (file: File) => string;
   };
   power: {
     preventSleep: () => Promise<number>;
@@ -103,6 +108,8 @@ export interface ElectronAPI {
   auth: {
     onTokenRefreshRequest: (callback: () => void) => () => void;
     sendFreshToken: (token: string) => void;
+    /** Tell the main process about every new access token (login / refresh) */
+    setToken: (token: string) => void;
   };
   gallery: {
     checkDuplicates: (
@@ -130,6 +137,13 @@ const electronAPI: ElectronAPI = {
     openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
     resolveDroppedFiles: (filePaths: string[]) => ipcRenderer.invoke('dialog:resolveDroppedFiles', filePaths),
     writeFilesToTemp: (files: Array<{ name: string; buffer: ArrayBuffer }>) => ipcRenderer.invoke('dialog:writeFilesToTemp', files),
+    getPathForFile: (file: File) => {
+      try {
+        return webUtils.getPathForFile(file);
+      } catch {
+        return '';
+      }
+    },
   },
   power: {
     preventSleep: () => ipcRenderer.invoke('power:preventSleep'),
@@ -194,6 +208,9 @@ const electronAPI: ElectronAPI = {
     },
     sendFreshToken: (token: string) => {
       ipcRenderer.send('auth:freshToken', token);
+    },
+    setToken: (token: string) => {
+      ipcRenderer.send('auth:setToken', token);
     },
   },
   gallery: {

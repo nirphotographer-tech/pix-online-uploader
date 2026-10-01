@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { supabase } from '../lib/supabase';
 import type { UploadSessionInfo } from '../../electron/preload';
 
@@ -123,6 +123,38 @@ export default function FolderSelectScreen({
     fetchFolders();
   }, [fetchFolders]);
 
+  // Folders created/renamed/deleted on the website show up here without a
+  // manual refresh. Only the folder rows are polled (cheap); photo counts are
+  // recounted when the window regains focus.
+  const foldersRef = useRef(folders);
+  foldersRef.current = folders;
+  useEffect(() => {
+    const syncFolderList = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const { data, error: syncError } = await supabase
+        .from('gallery_folders')
+        .select('*')
+        .eq('gallery_id', galleryId)
+        .order('folder_index', { ascending: true });
+      if (syncError || !data || data.length === 0) return;
+      const prev = foldersRef.current;
+      const changed = data.length !== prev.length ||
+        data.some((f: FolderItem, i: number) => f.id !== prev[i]?.id || f.name !== prev[i]?.name);
+      if (!changed) return;
+      const counts = new Map(prev.map((f) => [f.id, f.photo_count]));
+      const merged = data.map((f: FolderItem) => ({ ...f, photo_count: counts.get(f.id) ?? f.photo_count ?? 0 }));
+      setFolders(merged);
+      onFoldersLoaded?.(merged);
+    };
+    const interval = setInterval(syncFolderList, 15_000);
+    const onFocus = () => fetchFolders(true);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [galleryId, fetchFolders, onFoldersLoaded]);
+
   const handleCreateFolder = async () => {
     const trimmed = newFolderName.trim();
     if (!trimmed) return;
@@ -130,26 +162,46 @@ export default function FolderSelectScreen({
     setError('');
 
     try {
-      const maxIndex = folders.reduce((max, f) => Math.max(max, f.folder_index), -1);
-      const maxFolderNum = folders.reduce((max, f) => {
+      // Read the current folders from the DB, not this screen's copy: the
+      // website may have added folders since, and reusing their number would
+      // make the two folders collide.
+      const { data: dbFolders, error: listError } = await supabase
+        .from('gallery_folders')
+        .select('id, name, folder_index')
+        .eq('gallery_id', galleryId);
+      if (listError) throw new Error(listError.message);
+      const all = [...(dbFolders || []), ...folders];
+
+      const existing = (dbFolders || []).find((f) => f.name.trim() === trimmed);
+      if (existing) throw new Error('כבר קיימת תיקייה בשם הזה');
+
+      const maxIndex = all.reduce((max, f) => Math.max(max, f.folder_index ?? 0), -1);
+      let nextNum = all.reduce((max, f) => {
         const match = f.id.match(/-folder-(\d+)$/);
         return match ? Math.max(max, parseInt(match[1], 10)) : max;
-      }, 0);
-      const folderId = `${galleryId}-folder-${maxFolderNum + 1}`;
+      }, 0) + 1;
 
-      const { error: insertError } = await supabase.from('gallery_folders').insert({
-        id: folderId,
-        name: trimmed,
-        gallery_id: galleryId,
-        photographer_id: userId,
-        user_id: userId,
-        parent_id: null,
-        folder_index: maxIndex + 1,
-        position: 0,
-        is_default: false,
-        photo_count: 0,
-      });
-      if (insertError) throw new Error(insertError.message);
+      // Retry on a duplicate id (someone created a folder at the same moment)
+      for (let tries = 0; ; tries++) {
+        const { error: insertError } = await supabase.from('gallery_folders').insert({
+          id: `${galleryId}-folder-${nextNum}`,
+          name: trimmed,
+          gallery_id: galleryId,
+          photographer_id: userId,
+          user_id: userId,
+          parent_id: null,
+          folder_index: maxIndex + 1,
+          position: 0,
+          is_default: false,
+          photo_count: 0,
+        });
+        if (!insertError) break;
+        if (insertError.code === '23505' && tries < 5) {
+          nextNum++;
+          continue;
+        }
+        throw new Error(insertError.message);
+      }
 
       setNewFolderName('');
       setShowNewFolder(false);
@@ -331,8 +383,10 @@ export default function FolderSelectScreen({
                     <p className={`text-xs mt-0.5 ${isActive ? 'text-emerald-600' : 'text-gray-600'}`}>
                       {isUploading
                         ? `מעלה... ${uploadStatus.completedFiles}/${uploadStatus.totalFiles} תמונות (${uploadStatus.percentage}%)`
+                        : uploadStatus?.status === 'queued'
+                        ? 'ממתין להעלאה...'
                         : isDone
-                        ? `✓ ${uploadStatus.completedFiles} תמונות הועלו`
+                        ? `✓ ${uploadStatus.completedFiles} תמונות הועלו${uploadStatus.failedFiles > 0 ? ` · ${uploadStatus.failedFiles} נכשלו` : ''}`
                         : folder.photo_count > 0
                         ? `${folder.photo_count} תמונות`
                         : 'ריקה'}

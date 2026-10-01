@@ -2,6 +2,7 @@
  * Upload Manager — manages multiple concurrent upload sessions.
  * Each session uploads files to a specific gallery+folder, and multiple
  * sessions can run in parallel (e.g., uploading to different folders).
+ * A second upload to a folder that is already uploading waits its turn.
  */
 
 import { UploadQueue, ProgressPayload, StatsPayload } from './uploadQueue';
@@ -15,18 +16,25 @@ export interface UploadSessionInfo {
   totalFiles: number;
   completedFiles: number;
   failedFiles: number;
+  /** Failed files worth retrying (network/server errors) */
+  retryableFiles: number;
   totalSize: number;
   totalLoaded: number;
   percentage: number;
   speed: number;
   eta: number;
-  status: 'uploading' | 'done' | 'error';
+  status: 'queued' | 'uploading' | 'done' | 'error';
   errorMessage?: string;
 }
 
+type SessionFile = { path: string; name: string; size: number; type: string };
+
 interface SessionEntry {
-  queue: UploadQueue;
+  queue: UploadQueue | null; // null while queued behind another session
   info: UploadSessionInfo;
+  files: SessionFile[];
+  alreadyCompleted: number;
+  alreadyFailed: number;
 }
 
 interface UploadManagerOptions {
@@ -34,68 +42,54 @@ interface UploadManagerOptions {
   supabaseUrl: string;
   supabaseKey: string;
   concurrency: number;
-  tokenRefresher: () => Promise<string>;
+  getToken: () => string;
+  refreshToken: () => Promise<string>;
   onSessionUpdate: (session: UploadSessionInfo) => void;
   onSessionComplete: (session: UploadSessionInfo) => void;
   onAllSessionsComplete: () => void;
+  /** A file reached its final state: uploaded, or failed for good */
+  onFileSettled: (sessionId: string, filePath: string, outcome: 'completed' | 'skipped') => void;
+}
+
+export interface StartSessionOptions {
+  /** Files already uploaded in an earlier run of this session (resume) */
+  alreadyCompleted?: number;
+  /** Files that failed for good in an earlier run (resume) */
+  alreadyFailed?: number;
+  /** Total file count of the original session (resume) */
+  originalTotal?: number;
 }
 
 export class UploadManager {
   private sessions = new Map<string, SessionEntry>();
   private options: UploadManagerOptions;
-  // Queue for uploads to the same folder — new files wait for the current session to finish
-  private folderQueues = new Map<string, Array<{
-    sessionId: string;
-    files: Array<{ path: string; name: string; size: number; type: string }>;
-    galleryId: string;
-    galleryName: string;
-    folderId: string;
-    folderName: string;
-    token: string;
-    onFilePersistedComplete?: (fileName: string) => void;
-    alreadyCompleted: number;
-    originalTotal?: number;
-  }>>();
 
   constructor(options: UploadManagerOptions) {
     this.options = options;
   }
 
   /**
-   * Create a new upload session and start uploading immediately.
+   * Create a new upload session. Starts immediately, or queues behind a
+   * session that is already uploading to the same folder.
    */
   startSession(
     sessionId: string,
-    files: Array<{ path: string; name: string; size: number; type: string }>,
+    files: SessionFile[],
     galleryId: string,
     galleryName: string,
     folderId: string,
     folderName: string,
-    token: string,
-    onFilePersistedComplete?: (fileName: string) => void,
-    alreadyCompleted = 0,
-    originalTotal?: number
+    opts: StartSessionOptions = {},
   ): void {
-    // If the same folder is already uploading, queue this session to start after
-    const folderBusy = Array.from(this.sessions.values()).some(
-      (e) => e.info.folderId === folderId && e.info.status === 'uploading'
-    );
-    if (folderBusy) {
-      const q = this.folderQueues.get(folderId) || [];
-      q.push({ sessionId, files, galleryId, galleryName, folderId, folderName, token,
-        onFilePersistedComplete, alreadyCompleted: alreadyCompleted ?? 0, originalTotal });
-      this.folderQueues.set(folderId, q);
-      console.log(`[UploadManager] Session ${sessionId} queued — folder ${folderId} is busy`);
+    const existing = this.sessions.get(sessionId);
+    if (existing && (existing.info.status === 'uploading' || existing.info.status === 'queued')) {
+      console.log(`[UploadManager] Session ${sessionId} already running, ignoring`);
       return;
     }
 
-    // If session already exists, ignore (prevent double-start)
-    if (this.sessions.has(sessionId)) {
-      console.log(`[UploadManager] Session ${sessionId} already exists, ignoring`);
-      return;
-    }
-
-    const effectiveTotal = originalTotal ?? files.length;
+    const alreadyCompleted = opts.alreadyCompleted ?? 0;
+    const alreadyFailed = opts.alreadyFailed ?? 0;
+    const effectiveTotal = opts.originalTotal ?? files.length;
     const info: UploadSessionInfo = {
       sessionId,
       galleryId,
@@ -104,135 +98,154 @@ export class UploadManager {
       folderName,
       totalFiles: effectiveTotal,
       completedFiles: alreadyCompleted,
-      failedFiles: 0,
+      failedFiles: alreadyFailed,
+      retryableFiles: 0,
       totalSize: files.reduce((sum, f) => sum + f.size, 0),
       totalLoaded: 0,
-      percentage: effectiveTotal > 0 ? Math.round((alreadyCompleted / effectiveTotal) * 100) : 0,
+      percentage: effectiveTotal > 0 ? Math.round(((alreadyCompleted + alreadyFailed) / effectiveTotal) * 100) : 0,
       speed: 0,
       eta: 0,
-      status: 'uploading',
+      status: 'queued',
     };
+    const entry: SessionEntry = { queue: null, info, files, alreadyCompleted, alreadyFailed };
+    this.sessions.set(sessionId, entry);
+
+    if (this.isFolderBusy(galleryId, folderId, sessionId)) {
+      console.log(`[UploadManager] Session ${sessionId} queued — folder ${folderId} is busy`);
+      this.options.onSessionUpdate({ ...info });
+      return;
+    }
+    this.runSession(entry);
+  }
+
+  private isFolderBusy(galleryId: string, folderId: string, exceptSessionId: string): boolean {
+    return Array.from(this.sessions.values()).some(
+      (e) => e.info.sessionId !== exceptSessionId &&
+        e.info.galleryId === galleryId &&
+        e.info.folderId === folderId &&
+        e.info.status === 'uploading'
+    );
+  }
+
+  private runSession(entry: SessionEntry): void {
+    const { info, files, alreadyCompleted, alreadyFailed } = entry;
+    const sessionId = info.sessionId;
+    const effectiveTotal = info.totalFiles;
+    info.status = 'uploading';
 
     const queue = new UploadQueue({
       concurrency: this.options.concurrency,
       apiBaseUrl: this.options.apiBaseUrl,
-      token,
-      galleryId,
-      folderId,
+      galleryId: info.galleryId,
+      folderId: info.folderId,
+      folderName: info.folderName,
       supabaseUrl: this.options.supabaseUrl,
       supabaseKey: this.options.supabaseKey,
-      tokenRefresher: this.options.tokenRefresher,
+      getToken: this.options.getToken,
+      refreshToken: this.options.refreshToken,
       onProgress: (progress: ProgressPayload) => {
         info.totalLoaded = progress.totalLoaded;
-        // Scale percentage to account for already-completed files
-        const doneRatio = alreadyCompleted / effectiveTotal;
+        // Scale percentage to account for files settled in an earlier run
+        const doneRatio = (alreadyCompleted + alreadyFailed) / effectiveTotal;
         const remainingRatio = files.length / effectiveTotal;
         info.percentage = Math.round(doneRatio * 100 + remainingRatio * progress.totalPercentage);
         info.speed = progress.speed;
         info.eta = progress.eta;
         this.options.onSessionUpdate({ ...info });
       },
-      onFileComplete: (_fileId: string, success: boolean) => {
+      onFileComplete: (fileId: string, success: boolean, _error?: string, retryable?: boolean) => {
+        const file = queue.getFile(fileId);
         if (success) {
           info.completedFiles++;
-          // Persist completion so we can resume after restart
-          const fileName = queue.getFileName(_fileId);
-          if (fileName) onFilePersistedComplete?.(fileName);
         } else {
           info.failedFiles++;
+          if (retryable) info.retryableFiles++;
+        }
+        // Retryable failures stay pending on disk, so a retry / next launch picks them up
+        if (file && (success || !retryable)) {
+          this.options.onFileSettled(sessionId, file.path, success ? 'completed' : 'skipped');
         }
         this.options.onSessionUpdate({ ...info });
       },
       onAllComplete: (stats: StatsPayload) => {
-        info.status = stats.failed > 0 && stats.success === 0 ? 'error' : 'done';
+        info.status = stats.failed > 0 && stats.success === 0 && alreadyCompleted === 0 ? 'error' : 'done';
         if (stats.errorMessage) info.errorMessage = stats.errorMessage;
         info.percentage = 100;
+        info.speed = 0;
+        info.eta = 0;
         info.completedFiles = alreadyCompleted + stats.success;
-        info.failedFiles = stats.failed;
+        info.failedFiles = alreadyFailed + stats.failed;
+        info.retryableFiles = stats.retryableFailed;
         this.options.onSessionUpdate({ ...info });
         this.options.onSessionComplete({ ...info });
+        this.startNextQueued();
         this.checkAllComplete();
-        // Start next queued session for this folder (if any)
-        this.startNextInFolderQueue(folderId);
       },
     });
 
-    this.sessions.set(sessionId, { queue, info });
+    entry.queue = queue;
     queue.addFiles(files);
     queue.start();
+    this.options.onSessionUpdate({ ...info });
 
     console.log(
-      `[UploadManager] Started session ${sessionId}: ${files.length} files → ${galleryName}/${folderName}`
+      `[UploadManager] Started session ${sessionId}: ${files.length} files → ${info.galleryName}/${info.folderName}`
     );
   }
 
-  /**
-   * Cancel a specific session
-   */
-  cancelSession(sessionId: string): void {
-    const entry = this.sessions.get(sessionId);
-    if (entry) {
-      entry.queue.cancel();
-      this.sessions.delete(sessionId);
-      console.log(`[UploadManager] Cancelled session ${sessionId}`);
-      // Also remove from any folder queues
-      for (const [folderId, q] of this.folderQueues) {
-        const filtered = q.filter((item) => item.sessionId !== sessionId);
-        if (filtered.length !== q.length) {
-          this.folderQueues.set(folderId, filtered);
-          console.log(`[UploadManager] Removed queued session ${sessionId} from folder queue ${folderId}`);
-        }
-        // If we just freed a slot, start the next one
-        if (filtered.length === 0) {
-          this.folderQueues.delete(folderId);
-        }
-      }
-      this.checkAllComplete();
-      // If this folder has a queued session waiting, start it now
-      const folderId = entry.info.folderId;
-      this.startNextInFolderQueue(folderId);
+  /** Start any queued session whose folder is now free */
+  private startNextQueued(): void {
+    for (const entry of this.sessions.values()) {
+      if (entry.info.status !== 'queued') continue;
+      if (this.isFolderBusy(entry.info.galleryId, entry.info.folderId, entry.info.sessionId)) continue;
+      console.log(`[UploadManager] Starting queued session ${entry.info.sessionId}`);
+      this.runSession(entry);
     }
   }
 
-  /** Start the next queued session for a folder, if any */
-  private startNextInFolderQueue(folderId: string): void {
-    const q = this.folderQueues.get(folderId);
-    if (!q || q.length === 0) return;
-    const next = q.shift()!;
-    if (q.length === 0) this.folderQueues.delete(folderId);
-    console.log(`[UploadManager] Starting queued session ${next.sessionId} for folder ${folderId}`);
-    this.startSession(
-      next.sessionId, next.files, next.galleryId, next.galleryName,
-      next.folderId, next.folderName, next.token, next.onFilePersistedComplete,
-      next.alreadyCompleted, next.originalTotal
-    );
+  /** Cancel a specific session (running or queued) */
+  cancelSession(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+    entry.queue?.cancel();
+    this.sessions.delete(sessionId);
+    console.log(`[UploadManager] Cancelled session ${sessionId}`);
+    this.startNextQueued();
+    this.checkAllComplete();
   }
 
-  /**
-   * Remove a completed/errored session from tracking
-   */
+  /** Remove a completed/errored session from tracking */
   dismissSession(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry && (entry.info.status === 'uploading' || entry.info.status === 'queued')) return;
     this.sessions.delete(sessionId);
   }
 
-  /**
-   * Get info for all active sessions
-   */
+  getSession(sessionId: string): UploadSessionInfo | undefined {
+    const entry = this.sessions.get(sessionId);
+    return entry ? { ...entry.info } : undefined;
+  }
+
   getAllSessions(): UploadSessionInfo[] {
     return Array.from(this.sessions.values()).map((e) => ({ ...e.info }));
   }
 
-  /**
-   * Check if there are any active (uploading) sessions
-   */
+  /** True while any session is uploading or waiting to upload */
   hasActiveSessions(): boolean {
     return Array.from(this.sessions.values()).some(
-      (e) => e.info.status === 'uploading'
+      (e) => e.info.status === 'uploading' || e.info.status === 'queued'
     );
   }
 
+  /** The computer woke from sleep — restart requests that hung while it slept */
+  onSystemResume(): void {
+    for (const entry of this.sessions.values()) {
+      if (entry.info.status === 'uploading') entry.queue?.onSystemResume();
+    }
+  }
+
   private checkAllComplete(): void {
-    if (!this.hasActiveSessions() && this.sessions.size > 0) {
+    if (!this.hasActiveSessions()) {
       this.options.onAllSessionsComplete();
     }
   }

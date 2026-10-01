@@ -26,23 +26,28 @@ interface UploadStatusBarProps {
   sessions: UploadSessionInfo[];
   onCancel: (sessionId: string) => void;
   onDismiss: (sessionId: string) => void;
+  onRetry: (sessionId: string) => void;
 }
 
-export default function UploadStatusBar({ sessions, onCancel, onDismiss }: UploadStatusBarProps) {
+export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry }: UploadStatusBarProps) {
   const [expanded, setExpanded] = useState(false);
 
   if (sessions.length === 0) return null;
 
-  const activeSessions = sessions.filter((s) => s.status === 'uploading');
+  const activeSessions = sessions.filter((s) => s.status === 'uploading' || s.status === 'queued');
   const completedSessions = sessions.filter((s) => s.status === 'done');
   const errorSessions = sessions.filter((s) => s.status === 'error');
 
   const totalFiles = sessions.reduce((sum, s) => sum + s.totalFiles, 0);
   const totalCompleted = sessions.reduce((sum, s) => sum + s.completedFiles, 0);
   const totalFailed = sessions.reduce((sum, s) => sum + s.failedFiles, 0);
-  const totalSize = sessions.reduce((sum, s) => sum + s.totalSize, 0);
-  const totalLoaded = sessions.reduce((sum, s) => sum + s.totalLoaded, 0);
-  const overallPercentage = totalSize > 0 ? Math.round((totalLoaded / totalSize) * 100) : 0;
+  const totalSize = activeSessions.reduce((sum, s) => sum + s.totalSize, 0);
+  const totalLoaded = activeSessions.reduce((sum, s) => sum + s.totalLoaded, 0);
+  // Same weighting as each session's own percentage (includes files done in an earlier run)
+  const activeTotalFiles = activeSessions.reduce((sum, s) => sum + s.totalFiles, 0);
+  const overallPercentage = activeTotalFiles > 0
+    ? Math.round(activeSessions.reduce((sum, s) => sum + s.percentage * s.totalFiles, 0) / activeTotalFiles)
+    : 0;
   const totalSpeed = activeSessions.reduce((sum, s) => sum + s.speed, 0);
 
   const allDone = activeSessions.length === 0;
@@ -93,7 +98,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss }: Uploa
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-[13px] text-gray-800 font-medium">
-                  מעלה {totalCompleted}/{totalFiles} תמונות
+                  מעלה {activeSessions.reduce((sum, s) => sum + s.completedFiles, 0)}/{activeTotalFiles} תמונות
                 </span>
                 <span className="text-[11px] text-gray-500">
                   {formatSpeed(totalSpeed)}
@@ -117,11 +122,11 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss }: Uploa
             </div>
           ) : (
             <div className="flex items-center gap-2">
-              <span className={`text-[13px] font-medium ${hasErrors ? 'text-amber-300' : 'text-emerald-300'}`}>
-                {totalCompleted} תמונות הועלו בהצלחה
+              <span className={`text-[13px] font-medium ${hasErrors ? 'text-amber-700' : 'text-emerald-700'}`}>
+                {totalCompleted} מתוך {totalFiles} תמונות הועלו
               </span>
               {totalFailed > 0 && (
-                <span className="text-[11px] text-red-400/80 bg-red-500/10 px-1.5 py-0.5 rounded-md">
+                <span className="text-[11px] text-red-600 bg-red-500/10 px-1.5 py-0.5 rounded-md">
                   {totalFailed} נכשלו
                 </span>
               )}
@@ -158,7 +163,9 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss }: Uploa
               >
                 {/* Session status dot */}
                 <div className="flex-shrink-0">
-                  {session.status === 'uploading' ? (
+                  {session.status === 'queued' ? (
+                    <div className="w-2 h-2 rounded-full bg-gray-400" />
+                  ) : session.status === 'uploading' ? (
                     <div className="w-2 h-2 rounded-full bg-brand-primary animate-pulse" />
                   ) : session.status === 'done' ? (
                     <div className="w-2 h-2 rounded-full bg-emerald-400" />
@@ -170,7 +177,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss }: Uploa
                 {/* Session info */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-xs text-gray-300 truncate font-medium">{session.galleryName}</span>
+                    <span className="text-xs text-gray-800 truncate font-medium">{session.galleryName}</span>
                     {session.folderName !== 'כל הגלריה' && (
                       <span className="text-xs text-gray-600 truncate">/ {session.folderName}</span>
                     )}
@@ -191,14 +198,34 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss }: Uploa
                         <span className="text-[10px] text-gray-600">{formatSpeed(session.speed)}</span>
                       </>
                     )}
+                    {session.status === 'queued' && (
+                      <span className="text-[10px] text-gray-500">ממתין לסיום העלאה קודמת לתיקייה</span>
+                    )}
                     {session.failedFiles > 0 && (
-                      <span className="text-[10px] text-red-400">{session.failedFiles} נכשלו</span>
+                      <span className="text-[10px] text-red-600">{session.failedFiles} נכשלו</span>
                     )}
                   </div>
+                  {session.errorMessage && (
+                    <p className="text-[10px] text-red-600 mt-0.5">{session.errorMessage}</p>
+                  )}
                 </div>
 
+                {/* Retry files that failed on network/server errors */}
+                {session.status !== 'uploading' && session.status !== 'queued' && session.retryableFiles > 0 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onRetry(session.sessionId);
+                    }}
+                    className="flex-shrink-0 px-2 h-6 text-[11px] font-medium bg-brand-primary text-white hover:bg-brand-hover transition-all"
+                    title="נסה שוב להעלות את הקבצים שנכשלו"
+                  >
+                    נסה שוב ({session.retryableFiles})
+                  </button>
+                )}
+
                 {/* Action button */}
-                {session.status === 'uploading' && (
+                {(session.status === 'uploading' || session.status === 'queued') && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
@@ -206,7 +233,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss }: Uploa
                     }}
                     className="flex-shrink-0 w-6 h-6 rounded-md bg-dark-bg/50 flex items-center justify-center
                                text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                    title="ביטול"
+                    title="עצירת ההעלאה"
                   >
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -240,7 +267,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss }: Uploa
                   completedSessions.forEach((s) => onDismiss(s.sessionId));
                   errorSessions.forEach((s) => onDismiss(s.sessionId));
                 }}
-                className="text-[11px] text-gray-600 hover:text-gray-300 transition-colors"
+                className="text-[11px] text-gray-600 hover:text-gray-900 transition-colors"
               >
                 נקה הכל
               </button>

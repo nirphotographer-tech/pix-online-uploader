@@ -4,6 +4,7 @@ const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'tiff', 'tif', 'heic', '
 const SUPPORTED_FORMATS_DISPLAY = ['JPG', 'PNG', 'WebP', 'TIFF', 'HEIC'];
 
 function isImageFile(name: string): boolean {
+  if (name.startsWith('.')) return false; // macOS "._" metadata files on memory cards
   const ext = name.split('.').pop()?.toLowerCase() || '';
   return IMAGE_EXTENSIONS.includes(ext);
 }
@@ -244,52 +245,51 @@ export default function UploadScreen({
     dragCounter.current = 0;
     setIsDragging(false);
 
-    console.log('[DROP] handleDrop fired');
-    console.log('[DROP] dataTransfer.files count:', e.dataTransfer.files.length);
-    console.log('[DROP] dataTransfer.items count:', e.dataTransfer.items.length);
+    const rawFiles = Array.from(e.dataTransfer.files);
+    console.log(`[DROP] ${rawFiles.length} items dropped`);
 
-    const rawFiles = Array.from(e.dataTransfer.files) as Array<File & { path?: string }>;
-    rawFiles.forEach((f, i) => {
-      console.log(`[DROP] file[${i}]: name=${f.name} size=${f.size} path=${JSON.stringify((f as any).path)}`);
-    });
-
-    // ── Path-based flow (Electron normally provides file.path) ──
-    const filePaths = rawFiles.map((f) => (f as any).path as string | undefined).filter((p): p is string => !!p);
-    console.log('[DROP] resolved filePaths:', filePaths);
+    // Real paths (files AND folders). File.path no longer exists since
+    // Electron 32 — without this every drop fell back to copying whole photos
+    // through memory, and dropped folders were ignored.
+    const filePaths = rawFiles
+      .map((f) => window.electronAPI.dialog.getPathForFile(f))
+      .filter((p): p is string => !!p);
 
     let fileInfos: Array<{ name: string; size: number; path: string }> = [];
 
     if (filePaths.length > 0) {
-      console.log('[DROP] calling resolveDroppedFiles via IPC...');
-      fileInfos = await window.electronAPI.dialog.resolveDroppedFiles(filePaths);
+      setChecking(true);
+      try {
+        fileInfos = await window.electronAPI.dialog.resolveDroppedFiles(filePaths);
+      } finally {
+        setChecking(false);
+      }
       console.log('[DROP] resolveDroppedFiles returned:', fileInfos.length, 'files');
     }
 
-    // ── ArrayBuffer fallback: file.path unavailable (Electron 41+ on macOS Sequoia) ──
-    if (fileInfos.length === 0 && rawFiles.length > 0) {
-      console.warn('[DROP] file.path unavailable — reading files as ArrayBuffer and writing to temp dir');
-      try {
-        const toWrite: Array<{ name: string; buffer: ArrayBuffer }> = [];
-        for (const f of rawFiles) {
-          // Skip directories (size 0, no type) — folders can't be read this way
-          if (!f.type && f.size === 0) {
-            console.warn(`[DROP] skipping likely-directory: ${f.name}`);
-            continue;
-          }
-          const buf = await f.arrayBuffer();
-          toWrite.push({ name: f.name, buffer: buf });
+    // Last-resort fallback (no path available, e.g. a drag from another app):
+    // copy files to a temp folder one at a time, so memory never holds them all.
+    if (filePaths.length === 0 && rawFiles.length > 0) {
+      console.warn('[DROP] no paths available — copying dropped files to temp dir');
+      for (const f of rawFiles) {
+        if (!f.type && f.size === 0) continue; // a folder — can't be read this way
+        try {
+          const [info] = await window.electronAPI.dialog.writeFilesToTemp([{ name: f.name, buffer: await f.arrayBuffer() }]);
+          if (info) fileInfos.push(info);
+        } catch (err) {
+          console.error('[DROP] temp copy failed for', f.name, err);
         }
-        if (toWrite.length > 0) {
-          fileInfos = await window.electronAPI.dialog.writeFilesToTemp(toWrite);
-          console.log('[DROP] writeFilesToTemp returned:', fileInfos.length, 'files');
-        }
-      } catch (err) {
-        console.error('[DROP] ArrayBuffer fallback failed:', err);
       }
     }
 
     if (fileInfos.length === 0) {
       console.warn('[DROP] no files resolved — nothing to upload');
+      // Say so instead of silently doing nothing (e.g. a folder without photos)
+      setRejectedFiles({
+        count: rawFiles.length,
+        names: rawFiles.slice(0, 5).map((f) => f.name),
+        extensions: [],
+      });
       return;
     }
 
@@ -304,7 +304,7 @@ export default function UploadScreen({
   };
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-dark-bg">
+    <div className="flex flex-col h-full overflow-hidden bg-dark-bg">
       {/* Header */}
       <div className="flex items-center gap-3 px-6 py-4 border-b border-dark-border">
         <button
