@@ -164,6 +164,12 @@ export class UploadManager {
         info.eta = progress.eta;
         this.options.onSessionUpdate({ ...info });
       },
+      onFileSaved: (fileId: string) => {
+        // Persist right away; a re-save after a failed DB check reuses the same
+        // upload key, so it can't create a duplicate either
+        const file = queue.getFile(fileId);
+        if (file) this.options.onFileSettled(sessionId, file.path, 'completed');
+      },
       onFileComplete: (fileId: string, success: boolean, _error?: string, retryable?: boolean) => {
         const file = queue.getFile(fileId);
         if (success) {

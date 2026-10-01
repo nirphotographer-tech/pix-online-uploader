@@ -43,6 +43,11 @@ interface QueueOptions {
   refreshToken: () => Promise<string>;
   onProgress: (progress: ProgressPayload) => void;
   onFileComplete: (fileId: string, success: boolean, error?: string, retryable?: boolean) => void;
+  /**
+   * The server confirmed the save. Fired before the batched DB check, so a quit
+   * in that window doesn't upload the photo again (as a duplicate) on resume.
+   */
+  onFileSaved?: (fileId: string) => void;
   onAllComplete: (stats: StatsPayload) => void;
   /** Upload slots shared by all sessions (defaults to a private pool of `concurrency`) */
   uploadSlots?: UploadSlots;
@@ -531,6 +536,7 @@ export class UploadQueue {
         file.timings = timings;
 
         // ---- Saved. The DB check runs in batches (one query per VERIFY_BATCH photos) ----
+        this.options.onFileSaved?.(file.id);
         const photoId = file.processResult?.id;
         if (photoId && photoId !== 'unknown') {
           this.enqueueVerify(file);
