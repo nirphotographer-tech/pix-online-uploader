@@ -14,6 +14,7 @@ import { UploadManager, UploadSessionInfo } from './uploadManager';
 import {
   saveSession,
   markFileSettled,
+  withdrawFile as withdrawPersistedFile,
   removeSession as removePersistSession,
   loadPendingSessions,
   getRemainingFiles,
@@ -213,12 +214,12 @@ function createWindow(): void {
     }
     const choice = dialog.showMessageBoxSync(mainWindow!, {
       type: 'warning',
-      buttons: ['המשך להעלות ברקע', 'עצור וסגור'],
+      buttons: ['Keep uploading in background', 'Stop and close'],
       defaultId: 0,
       cancelId: 0,
-      title: 'יש העלאה פעילה',
-      message: 'יש העלאה פעילה',
-      detail: 'אם תסגרו עכשיו ההעלאה תיעצר, ותמשיך אוטומטית בפעם הבאה שתפתחו את התוכנה.',
+      title: 'Upload in progress',
+      message: 'Upload in progress',
+      detail: 'If you close now the upload will stop, and it will resume automatically the next time you open the app.',
     });
     if (choice === 0) {
       event.preventDefault();
@@ -344,11 +345,11 @@ app.on('before-quit', (event) => {
   if (!isQuitting && uploadManager?.hasActiveSessions()) {
     const choice = dialog.showMessageBoxSync({
       type: 'warning',
-      buttons: ['המשך להעלות', 'עצור וצא'],
+      buttons: ['Keep uploading', 'Stop and quit'],
       defaultId: 0,
       cancelId: 0,
-      message: 'יש העלאה פעילה',
-      detail: 'אם תצאו עכשיו ההעלאה תיעצר, ותמשיך אוטומטית בפעם הבאה שתפתחו את התוכנה.',
+      message: 'Upload in progress',
+      detail: 'If you quit now the upload will stop, and it will resume automatically the next time you open the app.',
     });
     if (choice === 0) {
       event.preventDefault();
@@ -387,7 +388,7 @@ ipcMain.handle('dialog:openFiles', async () => {
     properties: ['openFile', 'multiSelections'],
     filters: [
       {
-        name: 'תמונות',
+        name: 'Images',
         extensions: ['jpg', 'jpeg', 'png', 'webp', 'tiff', 'tif', 'heic', 'heif'],
       },
     ],
@@ -482,6 +483,12 @@ function getUploadManager(): UploadManager {
       getToken: () => accessToken,
       refreshToken: requestFreshToken,
       onFileSettled: (sessionId, filePath, outcome) => markFileSettled(sessionId, filePath, outcome),
+      onFileWithdrawn: (sessionId, filePath) => withdrawPersistedFile(sessionId, filePath),
+      onSessionEmptied: (session: UploadSessionInfo) => {
+        // Every file was taken over by a newer upload before this one started
+        removePersistSession(session.sessionId);
+        mainWindow?.webContents.send('upload:sessionUpdate', session);
+      },
       onSessionUpdate: (session: UploadSessionInfo) => {
         mainWindow?.webContents.send('upload:sessionUpdate', session);
       },
@@ -493,13 +500,15 @@ function getUploadManager(): UploadManager {
         } else {
           flushPersistence();
         }
+        // Everything was taken over by a newer "replace" — nothing to report
+        if (session.totalFiles === 0 && !session.errorMessage) return;
         const msg = session.errorMessage
           ? session.errorMessage
           : session.failedFiles > 0
-            ? `${session.completedFiles} מתוך ${session.totalFiles} תמונות הועלו בהצלחה`
-            : `${session.completedFiles} תמונות הועלו בהצלחה`;
+            ? `${session.completedFiles} of ${session.totalFiles} photos uploaded successfully`
+            : `${session.completedFiles} photos uploaded successfully`;
         new Notification({
-          title: session.errorMessage ? 'ההעלאה נעצרה' : `${session.galleryName} – ההעלאה הסתיימה`,
+          title: session.errorMessage ? 'Upload stopped' : `${session.galleryName}: upload complete`,
           body: msg,
         }).show();
       },
@@ -650,6 +659,11 @@ ipcMain.handle(
 // Files of this gallery that are still uploading (not in the DB yet)
 ipcMain.handle('upload:getActiveFiles', (_event, galleryId: string) => {
   return uploadManager?.getActiveFiles(galleryId) || [];
+});
+
+// "Replace" of files still uploading: photo id to replace per file (null = upload as new)
+ipcMain.handle('upload:takeOverFiles', (_event, galleryId: string, files: Array<{ name: string; size: number }>) => {
+  return uploadManager?.takeOverFiles(galleryId, files) ?? files.map(() => null);
 });
 
 // ── Pending sessions IPC (resume after restart) ──

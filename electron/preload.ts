@@ -103,6 +103,8 @@ export interface ElectronAPI {
     hasActiveSessions: () => Promise<boolean>;
     /** Files of this gallery still uploading or waiting to (not in the DB yet) */
     getActiveFiles: (galleryId: string) => Promise<ActiveUploadFile[]>;
+    /** "Replace" of files still uploading: photo id to replace per file (null = upload as new) */
+    takeOverFiles: (galleryId: string, files: Array<{ name: string; size: number }>) => Promise<Array<string | null>>;
     getPendingSessions: () => Promise<PersistedSessionInfo[]>;
     dismissPendingSession: (sessionId: string) => Promise<void>;
     resumePendingSession: (sessionId: string, token: string) => Promise<{ resumed: boolean; newSessionId?: string; remainingCount?: number; reason?: string }>;
@@ -179,6 +181,7 @@ const electronAPI: ElectronAPI = {
     getSessions: () => ipcRenderer.invoke('upload:getSessions'),
     hasActiveSessions: () => ipcRenderer.invoke('upload:hasActiveSessions'),
     getActiveFiles: (galleryId) => ipcRenderer.invoke('upload:getActiveFiles', galleryId),
+    takeOverFiles: (galleryId, files) => ipcRenderer.invoke('upload:takeOverFiles', galleryId, files),
     getPendingSessions: () => ipcRenderer.invoke('upload:getPendingSessions'),
     dismissPendingSession: (sessionId) => ipcRenderer.invoke('upload:dismissPendingSession', sessionId),
     resumePendingSession: (sessionId, token) => ipcRenderer.invoke('upload:resumePendingSession', sessionId, token),

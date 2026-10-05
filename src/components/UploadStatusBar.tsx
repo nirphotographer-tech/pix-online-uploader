@@ -71,7 +71,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
       {/* Summary bar */}
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-dark-hover transition-colors text-right"
+        className="w-full flex items-center gap-3 px-4 py-3 hover:bg-dark-hover transition-colors text-left"
       >
         {/* Status icon */}
         <div className={`flex-shrink-0 w-8 h-8 rounded-lg ${iconBg} flex items-center justify-center`}>
@@ -98,7 +98,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-[13px] text-gray-800 font-medium">
-                  מעלה {activeSessions.reduce((sum, s) => sum + s.completedFiles, 0)}/{activeTotalFiles} תמונות
+                  Uploading {activeSessions.reduce((sum, s) => sum + s.completedFiles, 0)}/{activeTotalFiles} photos
                 </span>
                 <span className="text-[11px] text-gray-500">
                   {formatSpeed(totalSpeed)}
@@ -107,7 +107,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
               {/* Inline progress bar */}
               <div className="w-full h-1.5 bg-dark-bg rounded-full overflow-hidden mt-1.5">
                 <div
-                  className={`h-full bg-gradient-to-l ${barColor} rounded-full transition-all duration-500 ease-out relative`}
+                  className={`h-full bg-gradient-to-r ${barColor} rounded-full transition-all duration-500 ease-out relative`}
                   style={{ width: `${overallPercentage}%` }}
                 >
                   <div className="absolute inset-0 animate-progress-pulse rounded-full" />
@@ -123,11 +123,11 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
           ) : (
             <div className="flex items-center gap-2">
               <span className={`text-[13px] font-medium ${hasErrors ? 'text-amber-700' : 'text-emerald-700'}`}>
-                {totalCompleted} מתוך {totalFiles} תמונות הועלו
+                {totalCompleted} of {totalFiles} photos uploaded
               </span>
               {totalFailed > 0 && (
                 <span className="text-[11px] text-red-600 bg-red-500/10 px-1.5 py-0.5 rounded-md">
-                  {totalFailed} נכשלו
+                  {totalFailed} failed
                 </span>
               )}
             </div>
@@ -190,7 +190,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
                       <>
                         <div className="w-12 h-1 bg-dark-bg rounded-full overflow-hidden">
                           <div
-                            className={`h-full bg-gradient-to-l ${sessionColor} rounded-full transition-all duration-300`}
+                            className={`h-full bg-gradient-to-r ${sessionColor} rounded-full transition-all duration-300`}
                             style={{ width: `${session.percentage}%` }}
                           />
                         </div>
@@ -199,10 +199,10 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
                       </>
                     )}
                     {session.status === 'queued' && (
-                      <span className="text-[10px] text-gray-500">ממתין לסיום העלאה קודמת לתיקייה</span>
+                      <span className="text-[10px] text-gray-500">Waiting for the previous upload to this folder</span>
                     )}
                     {session.failedFiles > 0 && (
-                      <span className="text-[10px] text-red-600">{session.failedFiles} נכשלו</span>
+                      <span className="text-[10px] text-red-600">{session.failedFiles} failed</span>
                     )}
                   </div>
                   {session.errorMessage && (
@@ -218,9 +218,9 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
                       onRetry(session.sessionId);
                     }}
                     className="flex-shrink-0 px-2 h-6 text-[11px] font-medium bg-brand-primary text-white hover:bg-brand-hover transition-all"
-                    title="נסה שוב להעלות את הקבצים שנכשלו"
+                    title="Retry the files that failed"
                   >
-                    נסה שוב ({session.retryableFiles})
+                    Retry ({session.retryableFiles})
                   </button>
                 )}
 
@@ -233,7 +233,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
                     }}
                     className="flex-shrink-0 w-6 h-6 rounded-md bg-dark-bg/50 flex items-center justify-center
                                text-gray-600 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                    title="עצירת ההעלאה"
+                    title="Stop upload"
                   >
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -248,7 +248,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
                     }}
                     className="flex-shrink-0 w-6 h-6 rounded-md bg-dark-bg/50 flex items-center justify-center
                                text-gray-600 hover:text-gray-400 transition-all"
-                    title="סגור"
+                    title="Close"
                   >
                     <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -269,7 +269,7 @@ export default function UploadStatusBar({ sessions, onCancel, onDismiss, onRetry
                 }}
                 className="text-[11px] text-gray-600 hover:text-gray-900 transition-colors"
               >
-                נקה הכל
+                Clear all
               </button>
             </div>
           )}

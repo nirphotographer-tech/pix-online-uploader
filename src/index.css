@@ -87,16 +87,13 @@ body {
   font-family: 'Heebo', sans-serif;
   background: #ffffff;
   color: #1a1a2e;
-  direction: rtl;
+  direction: ltr;
   user-select: none;
-  -webkit-app-region: drag;
 }
 
-/* Make interactive elements clickable in draggable region */
-button, input, select, textarea, a, [role="button"],
-.no-drag {
-  -webkit-app-region: no-drag;
-}
+/* The window is dragged only by the title bar in App.tsx. A drag region over
+   the whole body (with every button cut out as no-drag) made Electron
+   recompute the regions on every scroll — choppy scrolling on macOS. */
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {

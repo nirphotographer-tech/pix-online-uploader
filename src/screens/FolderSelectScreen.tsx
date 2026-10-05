@@ -125,7 +125,7 @@ export default function FolderSelectScreen({
         setFolders(foldersWithCounts);
         onFoldersLoaded?.(foldersWithCounts);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'שגיאה בטעינת התיקיות');
+        setError(err instanceof Error ? err.message : 'Failed to load folders');
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -195,7 +195,7 @@ export default function FolderSelectScreen({
       const all = [...(dbFolders || []), ...folders];
 
       const existing = (dbFolders || []).find((f) => f.name.trim().toLowerCase() === trimmed.toLowerCase());
-      if (existing) throw new Error('כבר קיימת תיקייה בשם הזה');
+      if (existing) throw new Error('A folder with this name already exists');
 
       const maxIndex = all.reduce((max, f) => Math.max(max, f.folder_index ?? 0), -1);
       let nextNum = all.reduce((max, f) => {
@@ -230,7 +230,7 @@ export default function FolderSelectScreen({
       setShowNewFolder(false);
       await fetchFolders(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'שגיאה ביצירת התיקייה');
+      setError(err instanceof Error ? err.message : 'Failed to create the folder');
     } finally {
       setCreating(false);
     }
@@ -259,7 +259,7 @@ export default function FolderSelectScreen({
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
             </svg>
-            <p className="text-gray-500 text-sm">טוען...</p>
+            <p className="text-gray-500 text-sm">Loading...</p>
           </div>
         </div>
       </div>
@@ -283,7 +283,7 @@ export default function FolderSelectScreen({
             <div>
               <h1 className="text-lg font-bold text-gray-900">{galleryName}</h1>
               <p className="text-xs text-gray-500 mt-0.5">
-                {folders.length} תיקיות · {totalPhotos} תמונות
+                {folders.length} {folders.length === 1 ? 'folder' : 'folders'} · {totalPhotos} {totalPhotos === 1 ? 'photo' : 'photos'}
               </p>
             </div>
           </div>
@@ -293,7 +293,7 @@ export default function FolderSelectScreen({
               onClick={() => fetchFolders(true)}
               disabled={refreshing}
               className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-500 hover:text-gray-900 hover:border-brand-primary/50 transition-all disabled:opacity-50"
-              title="רענון"
+              title="Refresh"
             >
               <svg className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -307,7 +307,7 @@ export default function FolderSelectScreen({
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
               </svg>
-              תיקייה חדשה
+              New folder
             </button>
           </div>
         </div>
@@ -325,7 +325,7 @@ export default function FolderSelectScreen({
                 if (e.key === 'Enter') handleCreateFolder();
                 if (e.key === 'Escape') { setShowNewFolder(false); setNewFolderName(''); }
               }}
-              placeholder="שם התיקייה..."
+              placeholder="Folder name..."
               autoFocus
               disabled={creating}
               className="flex-1 px-3 py-2 bg-dark-bg border border-dark-border rounded-lg text-gray-900 text-sm placeholder-gray-400 outline-none focus:border-brand-primary/50 transition-colors disabled:opacity-50"
@@ -335,13 +335,13 @@ export default function FolderSelectScreen({
               disabled={creating || !newFolderName.trim()}
               className="px-4 py-2 bg-brand-primary hover:bg-brand-hover text-white text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {creating ? 'יוצר...' : 'צור'}
+              {creating ? 'Creating...' : 'Create'}
             </button>
             <button
               onClick={() => { setShowNewFolder(false); setNewFolderName(''); }}
-              className="px-3 py-2 text-gray-500 hover:text-gray-300 text-sm transition-colors"
+              className="px-3 py-2 text-gray-500 hover:text-gray-900 text-sm transition-colors"
             >
-              ביטול
+              Cancel
             </button>
           </div>
           {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
@@ -354,7 +354,7 @@ export default function FolderSelectScreen({
           <div className="flex flex-col items-center justify-center h-full">
             <p className="text-red-400 text-sm mb-3">{error}</p>
             <button onClick={() => fetchFolders(false)} className="text-sm text-brand-primary hover:text-brand-hover transition-colors">
-              נסו שוב
+              Try again
             </button>
           </div>
         ) : (
@@ -369,7 +369,7 @@ export default function FolderSelectScreen({
                 <button
                   key={folder.id}
                   onClick={() => onSelectFolder(folder.id, folder.name)}
-                  className={`w-full group flex items-center gap-4 p-3.5 border rounded-xl transition-all duration-200 text-right ${
+                  className={`w-full group flex items-center gap-4 p-3.5 border rounded-xl transition-all duration-200 text-left ${
                     isActive
                       ? 'bg-emerald-50 border-emerald-300 hover:border-emerald-400 hover:bg-emerald-100'
                       : 'bg-dark-card border-dark-border hover:border-brand-primary/30 hover:bg-dark-hover'
@@ -405,14 +405,14 @@ export default function FolderSelectScreen({
                     </h3>
                     <p className={`text-xs mt-0.5 ${isActive ? 'text-emerald-600' : 'text-gray-600'}`}>
                       {isUploading
-                        ? `מעלה... ${uploadStatus.completedFiles}/${uploadStatus.totalFiles} תמונות (${uploadStatus.percentage}%)`
+                        ? `Uploading... ${uploadStatus.completedFiles}/${uploadStatus.totalFiles} photos (${uploadStatus.percentage}%)`
                         : uploadStatus?.status === 'queued'
-                        ? 'ממתין להעלאה...'
+                        ? 'Waiting to upload...'
                         : isDone
-                        ? `✓ ${uploadStatus.completedFiles} תמונות הועלו${uploadStatus.failedFiles > 0 ? ` · ${uploadStatus.failedFiles} נכשלו` : ''}`
+                        ? `✓ ${uploadStatus.completedFiles} uploaded${uploadStatus.failedFiles > 0 ? ` · ${uploadStatus.failedFiles} failed` : ''}`
                         : folder.photo_count > 0
-                        ? `${folder.photo_count} תמונות`
-                        : 'ריקה'}
+                        ? `${folder.photo_count} ${folder.photo_count === 1 ? 'photo' : 'photos'}`
+                        : 'Empty'}
                     </p>
                   </div>
 
@@ -432,7 +432,7 @@ export default function FolderSelectScreen({
                   {/* Arrow */}
                   {!isUploading && (
                     <svg
-                      className={`w-4 h-4 flex-shrink-0 rotate-180 transition-colors ${
+                      className={`w-4 h-4 flex-shrink-0 transition-colors ${
                         isDone ? 'text-emerald-500' : 'text-gray-700 group-hover:text-brand-primary'
                       }`}
                       fill="none" viewBox="0 0 24 24" stroke="currentColor"

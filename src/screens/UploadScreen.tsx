@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { checkFolder } from '../lib/folderCheck';
 import { onFoldersChanged } from '../lib/galleryChannel';
 import { supabase } from '../lib/supabase';
-import { classifyFiles, hasDuplicates } from '../lib/duplicates';
+import { classifyFiles, hasDuplicates, replaceTargets } from '../lib/duplicates';
 import DuplicateDialog, { type DuplicateChoice, type DuplicateDialogState } from '../components/DuplicateDialog';
 
 const IMAGE_EXTENSIONS = ['jpg', 'jpeg', 'png', 'webp', 'tiff', 'tif', 'heic', 'heif'];
@@ -116,7 +116,7 @@ export default function UploadScreen({
         return true;
       case 'folder-deleted':
         leftRef.current = true;
-        window.alert(`התיקייה "${currentFolderNameRef.current}" נמחקה באתר.`);
+        window.alert(`The folder “${currentFolderNameRef.current}” was deleted on the website.`);
         onBackRef.current();
         return false;
       case 'gallery-deleted':
@@ -223,7 +223,10 @@ export default function UploadScreen({
         report.inOtherFolders.size > 0
           ? supabase.from('gallery_folders').select('id, name').eq('gallery_id', galleryId).then((r) => r.data ?? [])
           : Promise.resolve([] as Array<{ id: string; name: string }>),
-        countFavorited(galleryId, report.edited.map((e) => e.photoId)),
+        countFavorited(galleryId, [
+          ...replaceTargets(report).map((r) => r.photoId),
+          ...Array.from(report.uploading.values()).flat().flatMap((u) => (u.photoId ? [u.photoId] : [])),
+        ]),
       ]);
 
       setDupDialog({
@@ -245,17 +248,43 @@ export default function UploadScreen({
     }
   }, [galleryId, folderId, token, autoUpload]);
 
-  const handleDuplicateChoice = useCallback((choice: DuplicateChoice) => {
+  const handleDuplicateChoice = useCallback(async (choice: DuplicateChoice) => {
     if (!dupDialog) return;
     const { state, files } = dupDialog;
     if (choice === 'cancel') return setDupDialog(null);
     if (choice === 'retry') return void checkAndUpload(files);
     if (choice === 'all' || state.kind !== 'ask') return void autoUpload(files);
-    // Replace: edited versions take the old photos' place, new files are added,
-    // copies that already exist (or are uploading) are not sent again
-    const { newFiles, edited } = state.report;
-    autoUpload([...newFiles, ...edited.map((e) => ({ ...e.file, replacePhotoId: e.photoId }))]);
-  }, [dupDialog, autoUpload, checkAndUpload]);
+
+    // Replace: every file that already exists takes the old photo's place
+    // (id, folder and position stay), new files are added
+    const { report } = state;
+    const chosen: FileInfo[] = [
+      ...report.newFiles,
+      ...replaceTargets(report).map(({ file, photoId }) => ({ ...file, replacePhotoId: photoId })),
+    ];
+
+    // Still uploading: an old copy not saved yet leaves its upload, one
+    // already saved is replaced like any existing photo
+    const stillUploading = Array.from(report.uploading.values()).flat();
+    if (stillUploading.length > 0) {
+      setDupDialog(null);
+      setStarting(true);
+      let photoIds: Array<string | null> = stillUploading.map(() => null);
+      try {
+        photoIds = await window.electronAPI.upload.takeOverFiles(
+          galleryId, stillUploading.map(({ file }) => ({ name: file.name, size: file.size })),
+        );
+      } catch (err) {
+        console.error('Taking over uploading files failed:', err);
+      }
+      stillUploading.forEach(({ file, photoId: inGallery }, i) => {
+        // The saved upload, or else the same photo already in the gallery
+        const photoId = photoIds[i] ?? inGallery;
+        chosen.push(photoId ? { ...file, replacePhotoId: photoId } : file);
+      });
+    }
+    autoUpload(chosen);
+  }, [dupDialog, galleryId, autoUpload, checkAndUpload]);
 
   const handleAddFiles = useCallback(async () => {
     const fileInfos = await window.electronAPI.dialog.openFiles();
@@ -355,7 +384,7 @@ export default function UploadScreen({
           className="w-8 h-8 rounded-lg bg-dark-card border border-dark-border flex items-center justify-center text-gray-400 hover:text-gray-900 hover:border-brand-primary/50 transition-all"
         >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
         </button>
         <div className="flex-1 min-w-0">
@@ -385,19 +414,19 @@ export default function UploadScreen({
               </svg>
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-red-300 text-sm font-medium mb-0.5" dir="rtl">
+              <p className="text-red-300 text-sm font-medium mb-0.5">
                 {rejectedFiles.count === 1
-                  ? 'קובץ אחד לא נתמך'
-                  : `${rejectedFiles.count} קבצים לא נתמכים`}
+                  ? '1 unsupported file'
+                  : `${rejectedFiles.count} unsupported files`}
               </p>
-              <p className="text-red-400/60 text-xs leading-relaxed" dir="rtl">
+              <p className="text-red-400/60 text-xs leading-relaxed">
                 {rejectedFiles.names.length <= 3
                   ? rejectedFiles.names.join(', ')
-                  : `${rejectedFiles.names.slice(0, 3).join(', ')} ועוד ${rejectedFiles.count - 3}...`
+                  : `${rejectedFiles.names.slice(0, 3).join(', ')} and ${rejectedFiles.count - 3} more...`
                 }
               </p>
-              <p className="text-red-400/40 text-[10px] mt-1" dir="rtl">
-                פורמטים נתמכים: {SUPPORTED_FORMATS_DISPLAY.join(', ')}
+              <p className="text-red-400/40 text-[10px] mt-1">
+                Supported formats: {SUPPORTED_FORMATS_DISPLAY.join(', ')}
               </p>
             </div>
             <button
@@ -462,8 +491,8 @@ export default function UploadScreen({
                   </svg>
                 </div>
               </div>
-              <p className="text-amber-400 text-sm font-medium mb-1">בודק כפילויות...</p>
-              <p className="text-gray-600 text-xs">מוודא שאין קבצים שכבר קיימים בגלריה</p>
+              <p className="text-amber-400 text-sm font-medium mb-1">Checking for duplicates...</p>
+              <p className="text-gray-600 text-xs">Making sure none of these files are already in the gallery</p>
             </div>
           ) : starting ? (
             <div className="text-center relative z-10">
@@ -477,8 +506,8 @@ export default function UploadScreen({
                   </svg>
                 </div>
               </div>
-              <p className="text-brand-primary text-base font-semibold mb-1">מתחיל העלאה...</p>
-              <p className="text-gray-500 text-xs">ההעלאה תמשיך ברקע, ניתן לנווט חופשי</p>
+              <p className="text-brand-primary text-base font-semibold mb-1">Starting upload...</p>
+              <p className="text-gray-500 text-xs">The upload continues in the background, feel free to navigate</p>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center text-center relative z-10 px-6 w-full">
@@ -502,26 +531,26 @@ export default function UploadScreen({
 
               {isDragging ? (
                 <>
-                  <p className="text-brand-primary text-lg font-semibold mb-1">שחררו כאן! ✨</p>
-                  <p className="text-brand-primary/60 text-sm">ההעלאה תתחיל מיד</p>
+                  <p className="text-brand-primary text-lg font-semibold mb-1">Drop them here! ✨</p>
+                  <p className="text-brand-primary/60 text-sm">The upload starts right away</p>
                 </>
               ) : (
                 <>
-                  <p className="text-gray-900 text-base font-semibold mb-1">גררו תמונות לכאן</p>
-                  <p className="text-gray-500 text-xs mb-6">ההעלאה תתחיל אוטומטית ברגע שתשחררו</p>
+                  <p className="text-gray-900 text-base font-semibold mb-1">Drag photos here</p>
+                  <p className="text-gray-500 text-xs mb-6">The upload starts as soon as you drop them</p>
 
                   <div className="flex items-center gap-3 justify-center mb-6">
                     <button
                       onClick={handleAddFiles}
                       className="px-6 py-2.5 bg-brand-primary hover:bg-brand-hover text-white text-sm rounded-md transition-all duration-200 font-semibold hover:shadow-lg hover:shadow-brand-primary/20 hover:-translate-y-0.5 active:translate-y-0"
                     >
-                      ✨ בחרו קבצים
+                      ✨ Choose files
                     </button>
                     <button
                       onClick={handleAddFolder}
                       className="px-6 py-2.5 bg-dark-card border border-gray-400 text-gray-700 text-sm rounded-md hover:bg-dark-hover hover:border-brand-primary/50 hover:text-gray-900 transition-all duration-200 font-medium"
                     >
-                      📁 בחרו תיקייה
+                      📁 Choose a folder
                     </button>
                   </div>
 

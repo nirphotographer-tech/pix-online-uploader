@@ -13,7 +13,12 @@ interface FileEntry {
   name: string;
   size: number;
   type: string;
-  status: 'pending' | 'uploading' | 'processing' | 'done' | 'error';
+  /** 'withdrawn' = a newer "replace" took this file over; it leaves the session */
+  status: 'pending' | 'uploading' | 'processing' | 'done' | 'error' | 'withdrawn';
+  /** Taken over while sending bytes — the pipeline stops before saving */
+  withdrawn?: boolean;
+  /** takeOver() calls waiting for this file to finish saving */
+  waiters?: Array<() => void>;
   loaded: number;
   peakLoaded: number;
   error?: string;
@@ -51,6 +56,8 @@ interface QueueOptions {
    */
   onFileSaved?: (fileId: string) => void;
   onAllComplete: (stats: StatsPayload) => void;
+  /** A newer "replace" took the file over: it no longer counts in this session */
+  onFileWithdrawn?: (fileId: string, previous: { failed: boolean; retryable: boolean }) => void;
   /** Upload slots shared by all sessions (defaults to a private pool of `concurrency`) */
   uploadSlots?: UploadSlots;
   /** Limit on concurrent save calls shared by all sessions */
@@ -118,8 +125,8 @@ const NETWORK_ERROR_RE = /fetch failed|Failed to fetch|NetworkError|ERR_INTERNET
 // Status codes where sending the same request again can't succeed
 const PERMANENT_HTTP_STATUSES = new Set([400, 403, 413, 415, 422]);
 
-const SESSION_ERROR_GALLERY_DELETED = 'הגלריה נמחקה מהאתר — ההעלאה נעצרה';
-const SESSION_ERROR_FOLDER_DELETED = 'התיקייה נמחקה באתר — ההעלאה נעצרה';
+const SESSION_ERROR_GALLERY_DELETED = 'The gallery was deleted on the website, upload stopped';
+const SESSION_ERROR_FOLDER_DELETED = 'The folder was deleted on the website, upload stopped';
 
 // ============================================================================
 // HTTP helpers
@@ -182,6 +189,12 @@ async function httpPut(url: string, body: Buffer, contentType: string, timeoutMs
     const text = await res.text();
     throw new HttpError(res.status, text, 'R2 PUT');
   }
+}
+
+/** Id of the photo row this file was saved as (null if unknown) */
+function savedPhotoId(file: FileEntry): string | null {
+  const id = file.processResult?.id;
+  return id && id !== 'unknown' ? id : null;
 }
 
 function describeError(err: unknown): string {
@@ -328,7 +341,7 @@ export class UploadQueue {
         console.error('[Upload] 🚫 Not enough storage — blocking entire batch');
         const usedGB = (info.used_bytes / 1024 / 1024 / 1024).toFixed(2);
         const limitGB = info.limit_bytes ? (info.limit_bytes / 1024 / 1024 / 1024).toFixed(1) : 'unlimited';
-        this.failSession(`אין מספיק מקום באחסון (${usedGB}GB / ${limitGB}GB). שדרגו את החבילה.`);
+        this.failSession(`Not enough storage (${usedGB}GB / ${limitGB}GB). Please upgrade your plan.`);
         return false;
       }
 
@@ -348,10 +361,11 @@ export class UploadQueue {
     if (this.sessionErrorMsg) return;
     this.sessionErrorMsg = message;
     for (const file of this.files) {
-      if (file.status !== 'done' && file.status !== 'error') {
+      if (file.status !== 'done' && file.status !== 'error' && file.status !== 'withdrawn') {
         file.status = 'error';
         file.error = message;
         file.retryable = false;
+        this.notifySettled(file);
       }
     }
     // Abort in-flight requests so their workers exit right away
@@ -369,10 +383,11 @@ export class UploadQueue {
   cancel(): void {
     this.isCancelled = true;
     for (const file of this.files) {
-      if (file.status !== 'done' && file.status !== 'error') {
+      if (file.status !== 'done' && file.status !== 'error' && file.status !== 'withdrawn') {
         file.status = 'error';
-        file.error = 'ההעלאה בוטלה';
+        file.error = 'Upload cancelled';
         file.retryable = false;
+        this.notifySettled(file);
       }
     }
     this.backgroundQueue = [];
@@ -398,6 +413,71 @@ export class UploadQueue {
   private abortInFlight(): void {
     this.abortController.abort();
     this.abortController = new AbortController();
+  }
+
+  /**
+   * "Replace" in a newer upload picked these files again (key = "name|size").
+   * A file not saved yet leaves this session; one already saved — or being
+   * saved — reports its photo id, so the new file takes that photo's place.
+   */
+  async takeOver(keys: Set<string>): Promise<Array<{ key: string; photoId: string | null }>> {
+    const results: Array<{ key: string; photoId: string | null }> = [];
+    const waits: Promise<void>[] = [];
+    for (const file of this.files) {
+      const key = `${file.name}|${file.size}`;
+      if (!keys.has(key) || file.status === 'withdrawn' || file.withdrawn) continue;
+      if (file.status === 'done') {
+        results.push({ key, photoId: savedPhotoId(file) });
+      } else if (file.status === 'processing') {
+        waits.push(this.waitSettled(file).then(() => {
+          if (file.status === 'done') {
+            results.push({ key, photoId: savedPhotoId(file) });
+          } else {
+            // The save failed — don't let a retry add it after all
+            this.withdraw(file);
+            results.push({ key, photoId: null });
+          }
+        }));
+      } else {
+        this.withdraw(file);
+        results.push({ key, photoId: null });
+      }
+    }
+    await Promise.all(waits);
+    if (results.length > 0) console.log(`[Upload] 🔁 Taken over by a newer upload: ${results.length} file(s)`);
+    this.checkCompletion();
+    this.processNext();
+    return results;
+  }
+
+  private withdraw(file: FileEntry): void {
+    const previous = { failed: file.status === 'error', retryable: file.status === 'error' && !!file.retryable };
+    if (file.status === 'uploading') {
+      // Bytes are on their way — the pipeline stops before the save
+      file.withdrawn = true;
+    } else {
+      file.status = 'withdrawn';
+      this.notifySettled(file);
+    }
+    this.options.onFileWithdrawn?.(file.id, previous);
+  }
+
+  /** The pipeline noticed the file was taken over */
+  private finishWithdraw(file: FileEntry): void {
+    file.status = 'withdrawn';
+    console.log(`[Upload] 🔁 ${file.name} dropped — a newer upload replaces it`);
+    this.notifySettled(file);
+  }
+
+  private waitSettled(file: FileEntry): Promise<void> {
+    if (file.status === 'done' || file.status === 'error' || file.status === 'withdrawn') return Promise.resolve();
+    return new Promise((resolve) => (file.waiters ??= []).push(resolve));
+  }
+
+  private notifySettled(file: FileEntry): void {
+    const waiters = file.waiters;
+    file.waiters = undefined;
+    waiters?.forEach((resolve) => resolve());
   }
 
   /** Get the file for a given file id (used by UploadManager for persistence) */
@@ -478,6 +558,7 @@ export class UploadQueue {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       if (this.isCancelled || this.sessionErrorMsg) return;
+      if (file.withdrawn) return this.finishWithdraw(file);
       const epochAtStart = this.resumeEpoch;
       const signal = this.abortController.signal;
 
@@ -499,7 +580,7 @@ export class UploadQueue {
           // (macOS "Optimize Mac Storage") blocks the whole app while it downloads.
           const fileBuffer = await fs.promises.readFile(file.path);
           if (fileBuffer.length === 0) {
-            throw Object.assign(new Error('הקובץ ריק'), { code: 'EMPTYFILE' });
+            throw Object.assign(new Error('The file is empty'), { code: 'EMPTYFILE' });
           }
           // The file may have changed since it was picked — sign the size we actually send
           file.size = fileBuffer.length;
@@ -529,6 +610,8 @@ export class UploadQueue {
         }
 
         // ---- Step 3: Save the photo record (server-side) ----
+        // Taken over while uploading: nothing is saved, the newer upload adds it
+        if (file.withdrawn) return this.finishWithdraw(file);
         file.status = 'processing';
         this.emitProgress(file);
 
@@ -557,10 +640,10 @@ export class UploadQueue {
         // ---- Local file problems: retrying won't bring the file back ----
         if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM' || code === 'EISDIR' || code === 'EMPTYFILE') {
           const message = code === 'EMPTYFILE'
-            ? 'הקובץ ריק או פגום'
+            ? 'The file is empty or damaged'
             : code === 'ENOENT'
-              ? 'הקובץ לא נמצא במחשב (הועבר או נמחק?)'
-              : 'אין הרשאה לקרוא את הקובץ';
+              ? 'File not found on this computer (moved or deleted?)'
+              : 'No permission to read the file';
           return this.failFile(file, message, false, errMsg);
         }
 
@@ -611,7 +694,7 @@ export class UploadQueue {
           }
 
           if (status === 403 && !lastError.message.startsWith('R2 PUT') && /storage/i.test(body)) {
-            this.failSession('אין מספיק מקום באחסון. שדרגו את החבילה.');
+            this.failSession('Not enough storage. Please upgrade your plan.');
             return;
           }
 
@@ -636,14 +719,16 @@ export class UploadQueue {
     }
 
     // All retries exhausted — a later retry (button / next app start) may still work
-    this.failFile(file, lastError ? describeError(lastError) : 'שגיאה לא ידועה', true);
+    this.failFile(file, lastError ? describeError(lastError) : 'Unknown error', true);
   }
 
   private failFile(file: FileEntry, message: string, retryable: boolean, detail?: string): void {
+    if (file.withdrawn) return this.finishWithdraw(file);
     file.status = 'error';
     file.error = message;
     file.retryable = retryable;
     console.error(`[Upload] 💀 FAILED (${retryable ? 'retryable' : 'permanent'}): ${file.name} — ${message}${detail && detail !== message ? ` [${detail}]` : ''}`);
+    this.notifySettled(file);
     this.options.onFileComplete(file.id, false, message, retryable);
   }
 
@@ -693,7 +778,7 @@ export class UploadQueue {
         body: JSON.stringify({
           id: folderId,
           gallery_id: this.options.galleryId,
-          name: this.options.folderName || 'תיקייה',
+          name: this.options.folderName || 'Folder',
           user_id: userId,
           photographer_id: userId,
           parent_id: null,
@@ -861,6 +946,7 @@ export class UploadQueue {
   private markDone(file: FileEntry): void {
     if (file.status !== 'processing') return;
     file.status = 'done';
+    this.notifySettled(file);
     this.emitProgress(file);
     const t = file.timings;
     console.log(`[Upload] ✅ DONE: ${file.name}${t ? ` (presign ${(t.presign / 1000).toFixed(2)}s, upload ${(t.upload / 1000).toFixed(2)}s, save ${(t.save / 1000).toFixed(2)}s)` : ''}`);
@@ -925,7 +1011,7 @@ export class UploadQueue {
     file.resaves = (file.resaves ?? 0) + 1;
     console.warn(`[Upload] ⚠️ DB verify: photo ${file.processResult?.id} NOT found — saving again (${file.resaves}/${MAX_RESAVES})`);
     if (file.resaves > MAX_RESAVES) {
-      this.failFile(file, 'התמונה הועלתה אבל לא נשמרה בגלריה', true);
+      this.failFile(file, 'The photo uploaded but wasn’t saved to the gallery', true);
       this.checkCompletion();
       return;
     }
@@ -953,8 +1039,9 @@ export class UploadQueue {
     if (!isComplete && now - this.lastEmitTime < 200) return;
     this.lastEmitTime = now;
 
-    const totalLoaded = this.files.reduce((sum, f) => sum + f.peakLoaded, 0);
-    const totalSize = this.files.reduce((sum, f) => sum + f.size, 0);
+    const counted = this.files.filter((f) => f.status !== 'withdrawn');
+    const totalLoaded = counted.reduce((sum, f) => sum + f.peakLoaded, 0);
+    const totalSize = counted.reduce((sum, f) => sum + f.size, 0);
 
     // Speed calculation
     if (now - this.lastCheckTime > 500) {
@@ -971,7 +1058,7 @@ export class UploadQueue {
     // Weighted progress: 80% upload + 20% processing
     const UPLOAD_WEIGHT = 0.8;
     let weightedProgress = 0;
-    for (const f of this.files) {
+    for (const f of counted) {
       const uploadShare = f.size > 0 ? (f.peakLoaded / f.size) : 0;
       let fileProgress: number;
       if (f.status === 'done' || f.status === 'error') fileProgress = 1.0;
@@ -1002,7 +1089,7 @@ export class UploadQueue {
 
   private checkCompletion(): void {
     if (this.isFinished || this.isCancelled) return;
-    const allDone = this.files.every((f) => f.status === 'done' || f.status === 'error');
+    const allDone = this.files.every((f) => f.status === 'done' || f.status === 'error' || f.status === 'withdrawn');
     // Wait for in-flight workers to exit, so nothing reports after completion
     if (!allDone || this.files.length === 0 || this.activeWorkers > 0) return;
     this.isFinished = true;
@@ -1016,7 +1103,7 @@ export class UploadQueue {
     console.log(`[Upload] 📊 Complete: ${success} success, ${failedFiles.length} failed (${retryableFailed} retryable), ${totalTime}s`);
 
     this.options.onAllComplete({
-      total: this.files.length,
+      total: this.files.filter((f) => f.status !== 'withdrawn').length,
       success,
       failed: failedFiles.length,
       retryableFailed,

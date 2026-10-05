@@ -26,7 +26,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
       .single();
 
     if (queryError || !data) {
-      throw new Error('שם המשתמש לא נמצא');
+      throw new Error('Username not found');
     }
 
     return data.email as string;
@@ -46,12 +46,12 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
       if (authError) {
         throw new Error(authError.message === 'Invalid login credentials'
-          ? 'שם משתמש או סיסמה שגויים'
+          ? 'Incorrect username or password'
           : authError.message);
       }
 
       if (!data.session) {
-        throw new Error('לא התקבלה תגובה מהשרת');
+        throw new Error('No response from the server');
       }
 
       await window.electronAPI.store.setSession({
@@ -67,14 +67,14 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         data.session.user.email || email
       );
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'שגיאה בהתחברות';
+      const msg = err instanceof Error ? err.message : 'Sign-in failed';
       const isNetworkError =
         msg.includes('Failed to fetch') ||
         msg.includes('NetworkError') ||
         msg.includes('fetch') ||
         msg.includes('ENOTFOUND') ||
         msg.includes('ERR_INTERNET_DISCONNECTED');
-      setError(isNetworkError ? 'אין חיבור לאינטרנט' : msg);
+      setError(isNetworkError ? 'No internet connection' : msg);
     } finally {
       setLoading(false);
     }
@@ -95,7 +95,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
       setMode('forgot-sent');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'שגיאה בשליחת המייל');
+      setError(err instanceof Error ? err.message : 'Failed to send the email');
     } finally {
       setLoading(false);
     }
@@ -128,7 +128,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
             />
           </div>
           <h1 className="text-2xl font-bold text-gray-900 text-center">Pix Online</h1>
-          <p className="text-gray-500 text-sm mt-1 text-center">כלי העלאה מהיר לצלמים</p>
+          <p className="text-gray-500 text-sm mt-1 text-center">Fast uploads for photographers</p>
           <span className="text-[10px] text-gray-400 mt-1">v2.6.1</span>
         </div>
 
@@ -143,7 +143,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
         {mode === 'login' && (
           <form onSubmit={handleSubmit} className="space-y-4">
             <div>
-              <label className="block text-xs text-gray-500 mb-1.5 font-medium">אימייל או שם משתמש</label>
+              <label className="block text-xs text-gray-500 mb-1.5 font-medium">Email or username</label>
               <input
                 type="text"
                 value={identifier}
@@ -158,13 +158,13 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <label className="block text-xs text-gray-500 font-medium">סיסמה</label>
+                <label className="block text-xs text-gray-500 font-medium">Password</label>
                 <button
                   type="button"
                   onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
                   className="text-xs text-brand-primary hover:underline"
                 >
-                  שכחתי סיסמה
+                  Forgot password?
                 </button>
               </div>
               <div className="relative">
@@ -199,16 +199,16 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
 
             {/* Google users hint */}
             <div className="rounded-xl bg-blue-50/80 border border-blue-100 px-4 py-3 text-center">
-              <p className="text-xs text-blue-700 font-medium mb-1">נרשמת עם Google? 👋</p>
+              <p className="text-xs text-blue-700 font-medium mb-1">Signed up with Google? 👋</p>
               <p className="text-[11px] text-blue-600 mb-2 leading-relaxed">
-                האפלודר מחייב סיסמה — לחץ כאן וניצור לך אחת במהירות
+                The uploader needs a password. Click here and we’ll set one up for you in a moment.
               </p>
               <button
                 type="button"
                 onClick={() => { setMode('forgot'); setForgotEmail(identifier.includes('@') ? identifier : ''); setError(''); }}
                 className="text-xs bg-blue-600 hover:bg-blue-700 text-white font-medium px-3 py-1.5 rounded-lg transition-colors"
               >
-                צור סיסמה בחינם →
+                Create a password →
               </button>
             </div>
 
@@ -223,10 +223,10 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
-                  מתחבר...
+                  Signing in...
                 </span>
               ) : (
-                'התחברות'
+                'Sign in'
               )}
             </button>
           </form>
@@ -241,14 +241,14 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
                 </svg>
               </div>
-              <p className="text-sm font-medium text-gray-900 mb-1">שלב 1 מתוך 2</p>
+              <p className="text-sm font-medium text-gray-900 mb-1">Step 1 of 2</p>
               <p className="text-xs text-gray-500 leading-relaxed">
-                הזן את המייל של חשבון Google שלך.<br />
-                נשלח לך קישור — לחץ עליו ובחר סיסמה.
+                Enter the email of your Google account.<br />
+                We’ll send you a link. Click it and choose a password.
               </p>
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1.5 font-medium">אימייל או שם משתמש</label>
+              <label className="block text-xs text-gray-500 mb-1.5 font-medium">Email or username</label>
               <input
                 type="text"
                 value={forgotEmail}
@@ -272,10 +272,10 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
                     <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
                   </svg>
-                  שולח...
+                  Sending...
                 </span>
               ) : (
-                'שלח קישור ליצירת סיסמה'
+                'Send password link'
               )}
             </button>
 
@@ -284,7 +284,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               onClick={() => { setMode('login'); setError(''); }}
               className="w-full text-center text-sm text-gray-500 hover:text-gray-700 transition-colors"
             >
-              ← חזרה להתחברות
+              ← Back to sign in
             </button>
           </form>
         )}
@@ -298,10 +298,10 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               </svg>
             </div>
             <div>
-              <p className="text-sm font-medium text-gray-900">מייל נשלח!</p>
+              <p className="text-sm font-medium text-gray-900">Email sent!</p>
               <p className="text-xs text-gray-500 mt-1 leading-relaxed">
-                בדוק את תיבת הדואר שלך ולחץ על הקישור ליצירת הסיסמה.
-                לאחר יצירת הסיסמה, תוכל להתחבר לאפלודר.
+                Check your inbox and click the link to create your password.
+                Once it’s set, you can sign in to the uploader.
               </p>
             </div>
             <button
@@ -309,7 +309,7 @@ export default function LoginScreen({ onLogin }: LoginScreenProps) {
               onClick={() => { setMode('login'); setError(''); }}
               className="w-full py-3 bg-gradient-to-r from-brand-primary to-brand-hover text-white font-medium rounded-xl text-sm"
             >
-              חזרה להתחברות
+              Back to sign in
             </button>
           </div>
         )}

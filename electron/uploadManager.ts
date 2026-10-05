@@ -53,6 +53,10 @@ interface UploadManagerOptions {
   onAllSessionsComplete: () => void;
   /** A file reached its final state: uploaded, or failed for good */
   onFileSettled: (sessionId: string, filePath: string, outcome: 'completed' | 'skipped') => void;
+  /** A newer "replace" took the file over — it leaves its session (and resume) */
+  onFileWithdrawn: (sessionId: string, filePath: string) => void;
+  /** Every file of a session that hadn't started was taken over */
+  onSessionEmptied: (session: UploadSessionInfo) => void;
 }
 
 export interface StartSessionOptions {
@@ -139,7 +143,6 @@ export class UploadManager {
   private runSession(entry: SessionEntry): void {
     const { info, files, alreadyCompleted, alreadyFailed } = entry;
     const sessionId = info.sessionId;
-    const effectiveTotal = info.totalFiles;
     info.status = 'uploading';
 
     const queue = new UploadQueue({
@@ -157,8 +160,9 @@ export class UploadManager {
       onProgress: (progress: ProgressPayload) => {
         info.totalLoaded = progress.totalLoaded;
         // Scale percentage to account for files settled in an earlier run
-        const doneRatio = (alreadyCompleted + alreadyFailed) / effectiveTotal;
-        const remainingRatio = files.length / effectiveTotal;
+        const total = Math.max(info.totalFiles, 1);
+        const doneRatio = (alreadyCompleted + alreadyFailed) / total;
+        const remainingRatio = files.length / total;
         info.percentage = Math.round(doneRatio * 100 + remainingRatio * progress.totalPercentage);
         info.speed = progress.speed;
         info.eta = progress.eta;
@@ -181,6 +185,20 @@ export class UploadManager {
         // Retryable failures stay pending on disk, so a retry / next launch picks them up
         if (file && (success || !retryable)) {
           this.options.onFileSettled(sessionId, file.path, success ? 'completed' : 'skipped');
+        }
+        this.options.onSessionUpdate({ ...info });
+      },
+      onFileWithdrawn: (fileId, previous) => {
+        const file = queue.getFile(fileId);
+        info.totalFiles = Math.max(0, info.totalFiles - 1);
+        if (previous.failed) {
+          info.failedFiles = Math.max(0, info.failedFiles - 1);
+          if (previous.retryable) info.retryableFiles = Math.max(0, info.retryableFiles - 1);
+        }
+        if (file) {
+          const idx = files.findIndex((f) => f.path === file.path);
+          if (idx >= 0) files.splice(idx, 1);
+          this.options.onFileWithdrawn(sessionId, file.path);
         }
         this.options.onSessionUpdate({ ...info });
       },
@@ -245,6 +263,51 @@ export class UploadManager {
 
   getAllSessions(): UploadSessionInfo[] {
     return Array.from(this.sessions.values()).map((e) => ({ ...e.info }));
+  }
+
+  /**
+   * "Replace" picked files (name + size) that are still in an upload of this
+   * gallery. One not saved yet leaves its upload; one saved (or being saved)
+   * gives its photo id, so the new file takes that photo's place.
+   * Returns a photo id (or null) per file, in the same order.
+   */
+  async takeOverFiles(galleryId: string, picked: Array<{ name: string; size: number }>): Promise<Array<string | null>> {
+    const keys = new Set(picked.map((f) => `${f.name}|${f.size}`));
+    const photoIds = new Map<string, string>();
+    const jobs: Promise<void>[] = [];
+
+    for (const entry of Array.from(this.sessions.values())) {
+      const { info } = entry;
+      if (info.galleryId !== galleryId || (info.status !== 'uploading' && info.status !== 'queued')) continue;
+
+      if (entry.queue) {
+        jobs.push(entry.queue.takeOver(keys).then((rows) => {
+          for (const row of rows) {
+            if (row.photoId && !photoIds.has(row.key)) photoIds.set(row.key, row.photoId);
+          }
+        }));
+        continue;
+      }
+
+      // Waiting behind another upload to its folder — nothing of it is sent yet
+      const dropped = entry.files.filter((f) => keys.has(`${f.name}|${f.size}`));
+      if (dropped.length === 0) continue;
+      entry.files = entry.files.filter((f) => !dropped.includes(f));
+      for (const f of dropped) this.options.onFileWithdrawn(info.sessionId, f.path);
+      info.totalFiles = Math.max(0, info.totalFiles - dropped.length);
+      info.totalSize = entry.files.reduce((sum, f) => sum + f.size, 0);
+      if (entry.files.length === 0) {
+        this.sessions.delete(info.sessionId);
+        info.status = 'done';
+        this.options.onSessionEmptied({ ...info });
+      } else {
+        this.options.onSessionUpdate({ ...info });
+      }
+    }
+
+    await Promise.all(jobs);
+    this.checkAllComplete();
+    return picked.map((f) => photoIds.get(`${f.name}|${f.size}`) ?? null);
   }
 
   /** Files of a gallery that are still uploading or waiting to (for the duplicate check) */

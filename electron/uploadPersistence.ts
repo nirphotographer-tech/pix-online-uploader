@@ -143,7 +143,8 @@ export function saveSession(
     galleryName,
     folderId,
     folderName,
-    files: files.map(({ path: p, name, size, type }) => ({ path: p, name, size, type })),
+    // replacePhotoId too: a "replace" resumed after a restart must still replace
+    files: files.map(({ path: p, name, size, type, replacePhotoId }) => ({ path: p, name, size, type, ...(replacePhotoId && { replacePhotoId }) })),
     completedPaths: [],
     skippedPaths: [],
     totalFiles: files.length,
@@ -162,6 +163,18 @@ export function markFileSettled(sessionId: string, filePath: string, outcome: 'c
     list.push(filePath);
     scheduleWrite();
   }
+}
+
+/** A newer "replace" took the file over — it no longer belongs to this session */
+export function withdrawFile(sessionId: string, filePath: string): void {
+  const session = readStore()[sessionId];
+  if (!session) return;
+  const before = session.files.length;
+  session.files = session.files.filter((f) => f.path !== filePath);
+  if (session.files.length === before) return;
+  session.totalFiles = Math.max(0, session.totalFiles - 1);
+  session.skippedPaths = session.skippedPaths.filter((p) => p !== filePath);
+  scheduleWrite();
 }
 
 /** Remove a session from disk (completed, cancelled, or dismissed) */

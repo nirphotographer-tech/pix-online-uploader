@@ -180,6 +180,8 @@ export default function App() {
     const broadcastProgress = (session: UploadSessionInfo, force = false) => {
       // The site only knows uploading/done/error; queued sessions show up once they start
       if (session.status === 'queued') return;
+      // Emptied by a newer "replace" before the site ever saw it
+      if (session.totalFiles === 0 && !latestSessions.has(session.sessionId)) return;
       latestSessions.set(session.sessionId, session);
       const now = Date.now();
       const last = lastBroadcast.get(session.sessionId) || 0;
@@ -210,6 +212,8 @@ export default function App() {
 
     const upsertSession = (session: UploadSessionInfo) => {
       setUploadSessions((prev) => {
+        // Every file was taken over by a newer "replace" — nothing left to show
+        if (session.totalFiles === 0) return prev.filter((s) => s.sessionId !== session.sessionId);
         const idx = prev.findIndex((s) => s.sessionId === session.sessionId);
         if (idx >= 0) {
           const updated = [...prev];
@@ -355,7 +359,7 @@ export default function App() {
   }, [auth]);
 
   const applyDeepLink = useCallback((payload: any) => {
-    setGallery({ id: payload.galleryId, name: payload.galleryName || 'גלריה' });
+    setGallery({ id: payload.galleryId, name: payload.galleryName || 'Gallery' });
 
     if (payload.folderId) {
       const rawFolderId = String(payload.folderId || '').trim();
@@ -363,7 +367,7 @@ export default function App() {
         ? rawFolderId
         : `${payload.galleryId}-folder-${rawFolderId}`;
 
-      setFolder({ id: normalizedFolderId, name: payload.folderName || 'תיקייה' });
+      setFolder({ id: normalizedFolderId, name: payload.folderName || 'Folder' });
       setScreen('upload');
     } else {
       setFolder(null);
@@ -409,7 +413,7 @@ export default function App() {
   }, [navigateTo]);
 
   const handleGalleryDeleted = useCallback(() => {
-    window.alert('הגלריה נמחקה באתר.');
+    window.alert('This gallery was deleted on the website.');
     setGallery(null);
     setFolder(null);
     setCachedFolders([]);
@@ -428,7 +432,7 @@ export default function App() {
 
   const handleCancelSession = useCallback(async (sessionId: string) => {
     const session = uploadSessions.find((s) => s.sessionId === sessionId);
-    if (!window.confirm('לעצור את ההעלאה? תמונות שכבר עלו יישארו בגלריה.')) return;
+    if (!window.confirm('Stop the upload? Photos already uploaded will stay in the gallery.')) return;
     await window.electronAPI.upload.cancelSession(sessionId);
     if (session) broadcastFinalRef.current?.(session);
     setUploadSessions((prev) => prev.filter((s) => s.sessionId !== sessionId));
@@ -445,7 +449,7 @@ export default function App() {
     if (!result.resumed) {
       console.log(`[Retry] Session ${sessionId} not resumed: ${result.reason}`);
       if (result.reason === 'files_not_found') {
-        window.alert('הקבצים שנכשלו כבר לא נמצאים במחשב (הועברו או נמחקו).');
+        window.alert('The files that failed are no longer on this computer (moved or deleted).');
       }
     }
   }, [auth]);
@@ -459,7 +463,7 @@ export default function App() {
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
         </div>
-        <p className="text-xs text-gray-600">טוען...</p>
+        <p className="text-xs text-gray-600">Loading...</p>
       </div>
     );
   }
@@ -469,20 +473,20 @@ export default function App() {
       {/* Title bar drag region with custom window controls */}
       <div className="h-9 flex-shrink-0 relative flex items-center" style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}>
         {window.electronAPI.windowControls.platform === 'win32' && (
-          <div className="flex items-center" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-            <button
-              onClick={() => window.electronAPI.windowControls.close()}
-              className="w-9 h-9 flex items-center justify-center text-[#1f2937] hover:bg-[#ef4444] hover:text-white transition-colors text-sm"
-              title="סגירה"
-            >
-              &#x2715;
-            </button>
+          <div className="ml-auto flex items-center" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
             <button
               onClick={() => window.electronAPI.windowControls.minimize()}
               className="w-9 h-9 flex items-center justify-center text-[#1f2937] hover:bg-[#e5e7eb] transition-colors text-sm"
-              title="מזעור"
+              title="Minimize"
             >
               &#x2212;
+            </button>
+            <button
+              onClick={() => window.electronAPI.windowControls.close()}
+              className="w-9 h-9 flex items-center justify-center text-[#1f2937] hover:bg-[#ef4444] hover:text-white transition-colors text-sm"
+              title="Close"
+            >
+              &#x2715;
             </button>
           </div>
         )}
