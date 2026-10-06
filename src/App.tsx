@@ -8,7 +8,7 @@ import { supabase } from './lib/supabase';
 import { sendUploadProgress, removeAllGalleryChannels } from './lib/galleryChannel';
 import type { UploadSessionInfo } from '../electron/preload';
 
-const APP_VERSION = '2.6.1';
+const APP_VERSION = __APP_VERSION__;
 
 type Screen = 'login' | 'galleries' | 'folders' | 'upload';
 
