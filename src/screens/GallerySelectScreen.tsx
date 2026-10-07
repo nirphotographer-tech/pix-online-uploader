@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { memo, useState, useEffect, useMemo, useRef } from 'react';
 import { supabase } from '../lib/supabase';
+import GalleryThumb from '../components/GalleryThumb';
 
 interface Gallery {
   id: string;
@@ -38,7 +39,7 @@ function formatDate(dateStr?: string): string {
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
-export default function GallerySelectScreen({
+function GallerySelectScreen({
   token,
   userId,
   onSelectGallery,
@@ -233,7 +234,7 @@ export default function GallerySelectScreen({
       )}
 
       {/* ── CONTENT AREA ────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto min-h-0">
+      <div data-scroll-root className="flex-1 overflow-y-auto min-h-0">
 
         {/* Loading skeletons */}
         {loading && (
@@ -314,24 +315,7 @@ export default function GallerySelectScreen({
                   {/* ── Thumbnail + Info (grouped together) ── */}
                   <div className="flex items-center gap-3 min-w-0 flex-1">
                     {/* Thumbnail */}
-                    <div className="w-14 h-14 flex-shrink-0 bg-[#111] overflow-hidden flex items-center justify-center">
-                      {coverUrl ? (
-                        <img
-                          src={coverUrl}
-                          alt={gallery.name}
-                          loading="lazy"
-                          decoding="async"
-                          className="w-full h-full object-cover"
-                          onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                        />
-                      ) : (
-                        <div className="w-full h-full flex items-center justify-center">
-                          <svg className="w-5 h-5 text-gray-700" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                          </svg>
-                        </div>
-                      )}
-                    </div>
+                    <GalleryThumb url={coverUrl} alt={gallery.name} />
 
                     {/* Name + Date — directly next to thumbnail */}
                     <div className="min-w-0 text-left">
@@ -392,3 +376,7 @@ export default function GallerySelectScreen({
     </div>
   );
 }
+
+// Upload progress re-renders App many times a second; the list only needs to
+// re-render when its own props change.
+export default memo(GallerySelectScreen);
